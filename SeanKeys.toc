@@ -1,0 +1,13 @@
+## Interface: 120005
+## Title: SeanKeys
+## Notes: Cross-protocol Mythic+ keystone viewer with teleport buttons.
+## Author: Sean
+## Version: 0.1.0
+## SavedVariables: SeanKeysDB
+## OptionalDeps: Details, AstralKeys, DBM-Core, BigWigs
+
+Libs\LibStub\LibStub.lua
+Libs\LibKeystone\LibKeystone.lua
+Libs\LibSpecialization\LibSpecialization.lua
+
+SeanKeys.lua
