@@ -18,6 +18,22 @@ local SECONDARY_LABELS = {
 	ITEM_MOD_LIFESTEAL_SHORT         = "Leech",
 }
 
+-- Deterministic order for picking "the" stat on a trinket that has only one
+-- secondary. pairs() iteration order isn't stable, so we walk this list.
+local SECONDARY_ORDER = {
+	"ITEM_MOD_CRIT_RATING_SHORT", "ITEM_MOD_HASTE_RATING_SHORT",
+	"ITEM_MOD_MASTERY_RATING_SHORT", "ITEM_MOD_VERSATILITY",
+	"ITEM_MOD_LEECH_RATING_SHORT", "ITEM_MOD_LIFESTEAL_SHORT",
+	"ITEM_MOD_AVOIDANCE_RATING_SHORT", "ITEM_MOD_SPEED_RATING_SHORT",
+}
+
+local PRIMARY_ORDER = {
+	{ key = "ITEM_MOD_STRENGTH_SHORT",  label = "Strength"  },
+	{ key = "ITEM_MOD_AGILITY_SHORT",   label = "Agility"   },
+	{ key = "ITEM_MOD_INTELLECT_SHORT", label = "Intellect" },
+	{ key = "ITEM_MOD_STAMINA_SHORT",   label = "Stamina"   },
+}
+
 local function GetSecondaries(itemLink)
 	if not itemLink then return "" end
 	local stats = (C_Item and C_Item.GetItemStats and C_Item.GetItemStats(itemLink)) or GetItemStats(itemLink)
@@ -28,6 +44,56 @@ local function GetSecondaries(itemLink)
 	end
 	table.sort(out)
 	return table.concat(out, " / ")
+end
+
+-- Picks the most "headline" stat for a trinket: primary stat (Str/Agi/Int) if
+-- present, else stamina, else the first non-zero secondary in canonical order.
+local function GetTrinketFlatStat(itemLink)
+	if not itemLink then return nil end
+	local stats = (C_Item and C_Item.GetItemStats and C_Item.GetItemStats(itemLink)) or GetItemStats(itemLink)
+	if not stats then return nil end
+	for _, entry in ipairs(PRIMARY_ORDER) do
+		if stats[entry.key] and stats[entry.key] > 0 then return entry.label end
+	end
+	for _, key in ipairs(SECONDARY_ORDER) do
+		if stats[key] and stats[key] > 0 then return SECONDARY_LABELS[key] end
+	end
+	return nil
+end
+
+-- "On Use" if the tooltip has a "Use:" line, "Proc" if it has an "Equip:"
+-- line that describes a triggered effect. Returns nil for plain stat sticks.
+local function GetTrinketTriggerKind(itemID)
+	if not itemID or not C_TooltipInfo or not C_TooltipInfo.GetItemByID then return nil end
+	local data = C_TooltipInfo.GetItemByID(itemID)
+	if not data or not data.lines then return nil end
+	local onUse = ITEM_SPELL_TRIGGER_ONUSE   or "Use:"
+	local onEq  = ITEM_SPELL_TRIGGER_ONEQUIP or "Equip:"
+	for _, line in ipairs(data.lines) do
+		local t = line.leftText
+		if t then
+			if t:sub(1, #onUse) == onUse then return "On Use" end
+			if t:sub(1, #onEq)  == onEq  then return "Proc" end
+		end
+	end
+	return nil
+end
+
+local function IsTrinket(itemID)
+	if not itemID then return false end
+	local _, _, _, equipLoc = C_Item.GetItemInfoInstant(itemID)
+	return equipLoc == "INVTYPE_TRINKET"
+end
+
+local function FormatStatsText(itemID, itemLink)
+	if IsTrinket(itemID) then
+		local stat = GetTrinketFlatStat(itemLink) or "?"
+		local trigger = GetTrinketTriggerKind(itemID)
+		if trigger then return stat .. " / " .. trigger end
+		return stat
+	end
+	local secs = GetSecondaries(itemLink)
+	return (secs == "") and "|cff666666-|r" or secs
 end
 
 -- Challenge map ID -> instance UI map ID for the *original* dungeon entry that
@@ -453,8 +519,7 @@ local function PopulateLootRow(row, lootInfo, challengeMapID)
 		if row.iconBtn.itemID ~= lootInfo.itemID then return end
 		local link = item:GetItemLink() or lootInfo.link
 		row.iconBtn.itemLink = link
-		local secs = GetSecondaries(link)
-		row.stats:SetText(secs == "" and "|cff666666-|r" or secs)
+		row.stats:SetText(FormatStatsText(lootInfo.itemID, link))
 		local icon = item:GetItemIcon()
 		if icon then row.iconBtn.icon:SetTexture(icon) end
 		-- Slot may still be missing if the EJ payload was empty; retry now

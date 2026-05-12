@@ -63,6 +63,77 @@ local function CopyRaiderIO(fullName)
 	StaticPopup_Show("SEANKEYS_COPY_URL", nil, nil, url)
 end
 
+local function GetMDT()
+	return _G.MDT or _G.MythicDungeonTools
+end
+
+-- Normalize a dungeon name for fuzzy matching: lowercase, strip color codes,
+-- strip whitespace and punctuation. Handles cases like "Nexus-Point Xenas"
+-- vs "Nexus-Point: Xenas" or season-prefix decorations.
+local function NormalizeDungeonName(s)
+	if type(s) ~= "string" then return "" end
+	s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+	s = s:lower():gsub("[%s%p]", "")
+	return s
+end
+
+-- Resolve our challengeMapID to MDT's internal dungeon index. MDT exposes a
+-- `zoneIdToDungeonIdx` table (keyed by uiMapID, not challengeMapID, hence the
+-- name-match fallback). Without testing every season we can't guarantee one
+-- works, so we try id-lookup first then fall back to fuzzy name matching.
+local function MDT_DungeonIdxFor(mdt, challengeMapID)
+	if type(mdt.zoneIdToDungeonIdx) == "table" then
+		local idx = mdt.zoneIdToDungeonIdx[challengeMapID]
+		if idx then return idx end
+	end
+	if type(mdt.dungeonList) == "table" then
+		local target = ns.GetDungeonName(challengeMapID)
+		if target then
+			local normTarget = NormalizeDungeonName(target)
+			for idx, name in pairs(mdt.dungeonList) do
+				if NormalizeDungeonName(name) == normTarget then return idx end
+			end
+		end
+	end
+	return nil
+end
+
+-- Opens MDT (if installed) and switches it to the given dungeon. Reading
+-- MDT's source clarifies the signature and gotchas:
+--   * UpdateToDungeon(idx, ignoreUpdateMap, init) — the 2nd arg is a SKIP
+--     flag for the map redraw, not "force". Pass nil to get the redraw.
+--   * It early-returns if `idx == db.currentDungeonIdx`, so we must NOT
+--     pre-set the db value (that would no-op our refresh).
+--   * ShowInterface is async (MDT:Async), and its internal path calls
+--     CheckCurrentZone which may auto-switch to whatever zone the player is
+--     in. To override that, our UpdateToDungeon must land AFTER main_frame
+--     is shown — we poll for IsShown.
+--   * UpdateToDungeon calls UpdatePresetDropDown which indexes main_frame,
+--     so we have to wait for main_frame to exist before calling it.
+local function TryOpenMDT(challengeMapID)
+	local mdt = GetMDT()
+	if not mdt or type(mdt.ShowInterface) ~= "function" then return false end
+	local match = MDT_DungeonIdxFor(mdt, challengeMapID)
+	mdt:ShowInterface()
+	if not match then
+		Dbg("MDT: no match for challengeMapID=", challengeMapID)
+		return true
+	end
+	if type(mdt.UpdateToDungeon) ~= "function" then return true end
+	local attempts = 0
+	local function tryUpdate()
+		attempts = attempts + 1
+		if mdt.main_frame and mdt.main_frame:IsShown() then
+			local ok, err = pcall(function() mdt:UpdateToDungeon(match) end)
+			if not ok then Dbg("MDT UpdateToDungeon error:", tostring(err)) end
+			return
+		end
+		if attempts < 40 then C_Timer.After(0.05, tryUpdate) end  -- ~2s ceiling
+	end
+	C_Timer.After(0, tryUpdate)
+	return true
+end
+
 local function CreateSeparator(parent)
 	local sep = CreateFrame("Frame", nil, parent)
 	sep:SetHeight(SEPARATOR_HEIGHT)
@@ -205,17 +276,23 @@ local function CreateRow(parent, index)
 	row.dungeon:SetPoint("LEFT", btn, "RIGHT", 4, 0)
 	row.dungeon:SetPoint("RIGHT", row.level, "LEFT", -8, 0)
 	row.dungeon:SetHeight(ROW_HEIGHT)
-	row.dungeon:RegisterForClicks("LeftButtonUp")
-	row.dungeon:SetScript("OnClick", function(self)
-		Dbg("dungeon row clicked, challengeMapID=", self.challengeMapID, "keyLevel=", self.keyLevel)
-		if self.challengeMapID and self.challengeMapID > 0 and ns.ShowLootFor then
+	row.dungeon:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	row.dungeon:SetScript("OnClick", function(self, button)
+		Dbg("dungeon row clicked, btn=", button, "challengeMapID=", self.challengeMapID, "keyLevel=", self.keyLevel)
+		if not self.challengeMapID or self.challengeMapID == 0 then return end
+		if button == "RightButton" then
+			TryOpenMDT(self.challengeMapID)
+		elseif ns.ShowLootFor then
 			ns.ShowLootFor(self.challengeMapID, self.keyLevel)
 		end
 	end)
 	row.dungeon:SetScript("OnEnter", function(self)
 		if not self.challengeMapID or self.challengeMapID == 0 then return end
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetText("Click to open loot preview", 0.7, 0.7, 0.7)
+		GameTooltip:AddLine("Left-click: loot preview", 0.7, 0.7, 0.7)
+		if GetMDT() then
+			GameTooltip:AddLine("Right-click: open MDT", 0.7, 0.7, 0.7)
+		end
 		GameTooltip:Show()
 	end)
 	row.dungeon:SetScript("OnLeave", function() GameTooltip:Hide() end)
