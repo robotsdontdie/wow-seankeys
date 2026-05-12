@@ -4,10 +4,16 @@
 ## Author: Sean
 ## Version: 0.1.0
 ## SavedVariables: SeanKeysDB
+## SavedVariablesPerCharacter: SeanKeysCharDB
 ## OptionalDeps: Details, AstralKeys, DBM-Core, BigWigs
 
 Libs\LibStub\LibStub.lua
 Libs\LibKeystone\LibKeystone.lua
 Libs\LibSpecialization\LibSpecialization.lua
 
+Core.lua
+Data.lua
+Wishlist.lua
+LootWindow.lua
+KeysWindow.lua
 SeanKeys.lua
