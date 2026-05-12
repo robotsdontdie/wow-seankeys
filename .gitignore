@@ -1,0 +1,22 @@
+# Claude Code workspace
+.claude/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backups
+*.bak
+*.orig
+*.rej
+
+# Compiled Lua (we ship sources)
+*.luac

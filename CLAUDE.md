@@ -4,7 +4,7 @@ A WoW retail addon that aggregates M+ keystone info across the three protocols p
 
 ## Deployed location
 
-The live addon lives at **`D:\Blizzard\World of Warcraft\_retail_\Interface\AddOns\SeanKeys\`**. The git repo here (`D:\git\robotsdontdie\wow-seankeys\`) is the source of truth; the deployed copy is what WoW loads. Edit the deployed copy directly while iterating; when stable, copy to the repo and commit.
+The WoW AddOn folder **`D:\Blizzard\World of Warcraft\_retail_\Interface\AddOns\SeanKeys\`** is a junction to this repo, so editing files in the repo directly is the same as editing the deployed copy. `/reload` in-game picks up your changes — no copy step needed.
 
 ## What it does
 

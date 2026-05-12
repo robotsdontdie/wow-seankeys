@@ -41,8 +41,10 @@ local db
 local keys = {}                  -- normalizedName -> { level, mapID, rating, source, lastSeen, class, specID, role }
 local selfDungeonBest = {}       -- challengeMapID -> { level, timed, mapScore }
 local rows = {}
+local separators = {}            -- pre-created horizontal section dividers
 local mainFrame
 local pendingButtonUpdates = {}  -- secure attribute updates queued for combat end
+local guildMembers = {}          -- [fullName] = true for current guild roster
 
 -- ----------------------------------------------------------------------------
 -- Debug log
@@ -172,6 +174,20 @@ local function NormalizeName(name)
 	return Ambiguate(name, "none")
 end
 
+-- Canonical "Name-Realm" form used as the account-wide cache key. Inputs may be
+-- short ("Name", same realm) or long ("Name-Realm", cross-realm); we always
+-- expand to long form so that alts cached on Realm A can be found from Realm B.
+local function FullName(name)
+	if not name or name == "" then return nil end
+	if name:find("-") then return name end
+	local realm = GetNormalizedRealmName()
+	if not realm or realm == "" then
+		realm = (GetRealmName() or ""):gsub("[%s'%-]", "")
+	end
+	if realm == "" then return name end
+	return name .. "-" .. realm
+end
+
 local function GetDungeonName(challengeMapID)
 	if not challengeMapID or challengeMapID == 0 then return "(no key)" end
 	local name = C_ChallengeMode.GetMapUIInfo(challengeMapID)
@@ -231,6 +247,70 @@ end
 -- Data store
 -- ----------------------------------------------------------------------------
 
+-- Account-wide cache: persist key + spec info for "my" characters and current
+-- guild members so they remain visible across sessions, even offline. Keyed
+-- by FullName(); category is "self" or "guild".
+local function CacheCategoryFor(fullName)
+	if not fullName or not db then return nil end
+	if db.myCharacters and db.myCharacters[fullName] then return "self" end
+	if guildMembers[fullName] then return "guild" end
+	return nil
+end
+
+local function PersistEntry(shortName, entry)
+	if not db or not entry then return end
+	local fn = FullName(shortName)
+	if not fn then return end
+	local cat = CacheCategoryFor(fn)
+	if not cat then return end
+	db.cache = db.cache or {}
+	local rec = db.cache[fn] or {}
+	rec.level = entry.level or 0
+	rec.mapID = entry.mapID or 0
+	if entry.rating and entry.rating > 0 then rec.rating = entry.rating end
+	if entry.class then rec.class = entry.class end
+	if entry.specID and entry.specID > 0 then rec.specID = entry.specID end
+	if entry.role and entry.role ~= "" then rec.role = entry.role end
+	if entry.source then rec.source = entry.source end
+	rec.lastSeen = time()
+	rec.category = cat
+	db.cache[fn] = rec
+end
+
+local function RecordSelf()
+	if not db then return end
+	db.myCharacters = db.myCharacters or {}
+	local short = NormalizeName(UnitName("player"))
+	local fn = FullName(short)
+	if not fn then return end
+	local _, class = UnitClass("player")
+	local rec = db.myCharacters[fn] or {}
+	if class then rec.class = class end
+	rec.lastSeen = time()
+	db.myCharacters[fn] = rec
+end
+
+local function RebuildGuildSet()
+	wipe(guildMembers)
+	if not IsInGuild() then return end
+	local n = GetNumGuildMembers() or 0
+	for i = 1, n do
+		local name = GetGuildRosterInfo(i)
+		if name and name ~= "" then
+			local fn = FullName(name)
+			if fn then guildMembers[fn] = true end
+		end
+	end
+end
+
+-- After the guild roster is known, retroactively persist any keys we already
+-- have in memory for guildies (their broadcasts may have arrived first).
+local function PersistAllTracked()
+	for shortName, entry in pairs(keys) do
+		PersistEntry(shortName, entry)
+	end
+end
+
 local function GetOrCreate(name)
 	local entry = keys[name]
 	if not entry then
@@ -261,6 +341,8 @@ local function UpsertKey(playerName, level, mapID, rating, source, class)
 	entry.lastSeen = GetTime()
 	if class and not entry.class then entry.class = class end
 
+	PersistEntry(name, entry)
+
 	if mainFrame and mainFrame:IsShown() then ns.Refresh() end
 end
 
@@ -275,6 +357,8 @@ local function UpsertSpec(playerName, specID, role)
 	end
 	if role and role ~= "" then entry.role = role end
 	entry.lastSeen = GetTime()
+
+	PersistEntry(name, entry)
 
 	if mainFrame and mainFrame:IsShown() then ns.Refresh() end
 end
@@ -415,6 +499,7 @@ local function IsKeyUpgrade(challengeMapID, candidateLevel)
 end
 
 local function PullSelf()
+	RecordSelf()
 	local level = C_MythicPlus.GetOwnedKeystoneLevel() or 0
 	local mapID = C_MythicPlus.GetOwnedKeystoneChallengeMapID() or 0
 	local rating = 0
@@ -483,14 +568,30 @@ local function CopyRaiderIO(fullName)
 	StaticPopup_Show("SEANKEYS_COPY_URL", nil, nil, url)
 end
 
+local SEPARATOR_HEIGHT = 10
+
+local function CreateSeparator(parent)
+	local sep = CreateFrame("Frame", nil, parent)
+	sep:SetHeight(SEPARATOR_HEIGHT)
+	local line = sep:CreateTexture(nil, "ARTWORK")
+	line:SetHeight(1)
+	line:SetPoint("LEFT", sep, "LEFT", 0, 0)
+	line:SetPoint("RIGHT", sep, "RIGHT", 0, 0)
+	line:SetColorTexture(0.6, 0.5, 0.2, 0.6)
+	sep.line = line
+	sep:Hide()
+	return sep
+end
+
 local function CreateRow(parent, index)
 	local row = CreateFrame("Frame", nil, parent)
 	row:SetSize(FRAME_W - 20, ROW_HEIGHT)
-	row:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -60 - (index - 1) * ROW_HEIGHT)
+	-- Position is assigned dynamically in Refresh() so section separators
+	-- can shift rows down.
 
 	row.bg = row:CreateTexture(nil, "BACKGROUND")
 	row.bg:SetAllPoints()
-	row.bg:SetColorTexture(1, 1, 1, index % 2 == 0 and 0.08 or 0.05)
+	row.bg:SetColorTexture(1, 1, 1, 0.05)
 
 	-- Role icon
 	row.role = row:CreateTexture(nil, "ARTWORK")
@@ -749,6 +850,12 @@ local function BuildFrame()
 		rows[i] = CreateRow(f, i)
 	end
 
+	-- Two separators are enough: party|alts and alts|guildies (or party|guildies
+	-- when there are no alts).
+	for i = 1, 2 do
+		separators[i] = CreateSeparator(f)
+	end
+
 	mainFrame = f
 	return f
 end
@@ -785,6 +892,120 @@ local function CollectPartyNames()
 	return list, set
 end
 
+-- Collect each section's full-name list. Sections are dedup'd against earlier
+-- sections (party wins over alts wins over guild) so a guildie currently in
+-- our party only appears once, at the top.
+local function CollectAlts(excludeSet)
+	local list = {}
+	if not db or not db.myCharacters then return list end
+	local selfFull = FullName(NormalizeName(UnitName("player")))
+	for fn in pairs(db.myCharacters) do
+		if fn ~= selfFull and not excludeSet[fn] then
+			list[#list + 1] = fn
+			excludeSet[fn] = true
+		end
+	end
+	return list
+end
+
+local function CollectGuildies(excludeSet)
+	local list = {}
+	if not db or not db.cache then return list end
+	for fn, rec in pairs(db.cache) do
+		if rec.category == "guild" and not excludeSet[fn] then
+			list[#list + 1] = fn
+			excludeSet[fn] = true
+		end
+	end
+	return list
+end
+
+local function EntryFor(fullName)
+	local shortName = Ambiguate(fullName, "none")
+	local live = keys[shortName]
+	local cached = db and db.cache and db.cache[fullName]
+	return live or cached or {}, (live ~= nil), shortName
+end
+
+local function SortByLevelDesc(list)
+	table.sort(list, function(a, b)
+		local ea = select(1, EntryFor(a))
+		local eb = select(1, EntryFor(b))
+		local la = (ea.level) or 0
+		local lb = (eb.level) or 0
+		if la == lb then return a < b end
+		return la > lb
+	end)
+end
+
+local function PopulateRow(row, fullName, rowIdx)
+	local entry, isLive, shortName = EntryFor(fullName)
+
+	-- Stripe alpha alternates by visible row index so the pattern stays
+	-- consistent across sections.
+	row.bg:SetColorTexture(1, 1, 1, rowIdx % 2 == 0 and 0.08 or 0.05)
+
+	SetRoleIcon(row.role, entry.role)
+
+	if entry.specID and entry.specID > 0 then
+		local _, _, _, icon = GetSpecializationInfoByID(entry.specID)
+		if icon then
+			row.specIcon:SetTexture(icon)
+			row.specIcon:Show()
+		else
+			row.specIcon:Hide()
+		end
+	else
+		row.specIcon:Hide()
+	end
+
+	row.nameBtn.text:SetText(shortName)
+	local r, g, b = GetClassColor(entry.class)
+	row.nameBtn.text:SetTextColor(r, g, b)
+	local tip = shortName
+	local spec = SpecName(entry.specID)
+	if spec then tip = spec .. " " .. (entry.class or "") .. " - " .. shortName end
+	row.nameBtn.tip = tip
+	row.nameBtn.fullName = shortName
+
+	local lvl = entry.level or 0
+	row.dungeon.challengeMapID = entry.mapID
+	row.dungeon.keyLevel = lvl
+	if lvl > 0 then
+		if isLive then
+			row.dungeon.text:SetText(GetDungeonName(entry.mapID))
+		else
+			-- Cache-only entry: grey the dungeon name to signal stale data.
+			row.dungeon.text:SetText("|cff888888" .. GetDungeonName(entry.mapID) .. "|r")
+		end
+		row.level:SetText(tostring(lvl))
+		local lr, lg, lb = KeyLevelColor(lvl)
+		row.level:SetTextColor(lr, lg, lb)
+		local upgrade = IsKeyUpgrade(entry.mapID, lvl)
+		row.upgrade.mapID = entry.mapID
+		row.upgrade.candidateLevel = lvl
+		if upgrade then row.upgrade:Show() else row.upgrade:Hide() end
+	else
+		row.dungeon.text:SetText("|cff888888no key|r")
+		row.level:SetText("")
+		row.upgrade.mapID = nil
+		row.upgrade.candidateLevel = nil
+		row.upgrade:Hide()
+	end
+
+	local rating = entry.rating or 0
+	if rating > 0 then
+		row.rating:SetText(tostring(math.floor(rating)))
+	else
+		row.rating:SetText("|cff666666-|r")
+	end
+
+	row.source:SetText(entry.source and ("|cff666666" .. entry.source .. "|r") or "")
+
+	local spellID = TELEPORT_SPELL_BY_CHALLENGEMAP[entry.mapID or 0]
+	SetTeleportButton(row.teleport, spellID)
+end
+
 function ns.Refresh(force)
 	if force then
 		PullSelf()
@@ -797,83 +1018,67 @@ function ns.Refresh(force)
 	end
 	if not mainFrame then return end
 
-	local partyList, partySet = CollectPartyNames()
-	local display = {}
-	for _, name in ipairs(partyList) do display[#display + 1] = name end
-	local extras = {}
-	for name in pairs(keys) do if not partySet[name] then extras[#extras + 1] = name end end
-	table.sort(extras, function(a, b)
-		local la = (keys[a] and keys[a].level) or 0
-		local lb = (keys[b] and keys[b].level) or 0
-		if la == lb then return a < b end
-		return la > lb
-	end)
-	for _, name in ipairs(extras) do display[#display + 1] = name end
+	-- Section 1: current party (live).
+	local partyShorts = CollectPartyNames()
+	local partyFulls, seen = {}, {}
+	for _, sn in ipairs(partyShorts) do
+		local fn = FullName(sn)
+		if fn and not seen[fn] then
+			partyFulls[#partyFulls + 1] = fn
+			seen[fn] = true
+		end
+	end
 
-	local visible = VisibleRowCount()
-	for i = 1, MAX_ROWS do
-		local row = rows[i]
-		local name = display[i]
-		if not name or i > visible then
-			row:Hide()
+	-- Section 2: account alts (excluding current player + anyone in party).
+	local altFulls = CollectAlts(seen)
+	SortByLevelDesc(altFulls)
+
+	-- Section 3: cached guildies (excluding anyone above).
+	local guildFulls = CollectGuildies(seen)
+	SortByLevelDesc(guildFulls)
+
+	-- Build the layout sequence: row, row, sep, row, sep, row, ...
+	local items = {}
+	for _, fn in ipairs(partyFulls) do items[#items + 1] = { kind = "row", fn = fn } end
+	if #partyFulls > 0 and (#altFulls > 0 or #guildFulls > 0) then
+		items[#items + 1] = { kind = "sep" }
+	end
+	for _, fn in ipairs(altFulls) do items[#items + 1] = { kind = "row", fn = fn } end
+	if #altFulls > 0 and #guildFulls > 0 then
+		items[#items + 1] = { kind = "sep" }
+	end
+	for _, fn in ipairs(guildFulls) do items[#items + 1] = { kind = "row", fn = fn } end
+
+	-- Hide everything first; we'll show only what fits.
+	for i = 1, MAX_ROWS do rows[i]:Hide() end
+	for i = 1, #separators do separators[i]:Hide() end
+
+	local contentH = mainFrame:GetHeight() - ROWS_TOP_OFFSET - ROWS_BOTTOM_PAD
+	local y = 0
+	local rowIdx, sepIdx = 0, 0
+	for _, item in ipairs(items) do
+		if item.kind == "sep" then
+			local needed = SEPARATOR_HEIGHT
+			if y + needed > contentH then break end
+			sepIdx = sepIdx + 1
+			local sep = separators[sepIdx]
+			if not sep then break end
+			sep:ClearAllPoints()
+			sep:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 14, -(ROWS_TOP_OFFSET + y))
+			sep:SetPoint("TOPRIGHT", mainFrame, "TOPRIGHT", -14, -(ROWS_TOP_OFFSET + y))
+			sep:SetHeight(SEPARATOR_HEIGHT)
+			sep:Show()
+			y = y + SEPARATOR_HEIGHT
 		else
+			if y + ROW_HEIGHT > contentH then break end
+			rowIdx = rowIdx + 1
+			local row = rows[rowIdx]
+			if not row then break end
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -(ROWS_TOP_OFFSET + y))
+			PopulateRow(row, item.fn, rowIdx)
 			row:Show()
-			local entry = keys[name] or {}
-
-			SetRoleIcon(row.role, entry.role)
-
-			if entry.specID and entry.specID > 0 then
-				local _, _, _, icon = GetSpecializationInfoByID(entry.specID)
-				if icon then
-					row.specIcon:SetTexture(icon)
-					row.specIcon:Show()
-				else
-					row.specIcon:Hide()
-				end
-			else
-				row.specIcon:Hide()
-			end
-
-			local r, g, b = GetClassColor(entry.class)
-			row.nameBtn.text:SetText(name)
-			row.nameBtn.text:SetTextColor(r, g, b)
-			local tip = name
-			local spec = SpecName(entry.specID)
-			if spec then tip = spec .. " " .. (entry.class or "") .. " - " .. name end
-			row.nameBtn.tip = tip
-			row.nameBtn.fullName = name
-
-			local lvl = entry.level or 0
-			row.dungeon.challengeMapID = entry.mapID
-			row.dungeon.keyLevel = lvl
-			if lvl > 0 then
-				row.dungeon.text:SetText(GetDungeonName(entry.mapID))
-				row.level:SetText(tostring(lvl))
-				local lr, lg, lb = KeyLevelColor(lvl)
-				row.level:SetTextColor(lr, lg, lb)
-				local upgrade = IsKeyUpgrade(entry.mapID, lvl)
-				row.upgrade.mapID = entry.mapID
-				row.upgrade.candidateLevel = lvl
-				if upgrade then row.upgrade:Show() else row.upgrade:Hide() end
-			else
-				row.dungeon.text:SetText("|cff888888no key|r")
-				row.level:SetText("")
-				row.upgrade.mapID = nil
-				row.upgrade.candidateLevel = nil
-				row.upgrade:Hide()
-			end
-
-			local rating = entry.rating or 0
-			if rating > 0 then
-				row.rating:SetText(tostring(math.floor(rating)))
-			else
-				row.rating:SetText("|cff666666-|r")
-			end
-
-			row.source:SetText(entry.source and ("|cff666666" .. entry.source .. "|r") or "")
-
-			local spellID = TELEPORT_SPELL_BY_CHALLENGEMAP[entry.mapID or 0]
-			SetTeleportButton(row.teleport, spellID)
+			y = y + ROW_HEIGHT
 		end
 	end
 end
@@ -1433,6 +1638,8 @@ boot:RegisterEvent("ADDON_LOADED")
 boot:RegisterEvent("PLAYER_LOGIN")
 boot:RegisterEvent("PLAYER_ENTERING_WORLD")
 boot:RegisterEvent("GROUP_ROSTER_UPDATE")
+boot:RegisterEvent("GUILD_ROSTER_UPDATE")
+boot:RegisterEvent("PLAYER_GUILD_UPDATE")
 boot:RegisterEvent("CHALLENGE_MODE_COMPLETED")
 boot:RegisterEvent("BAG_UPDATE_DELAYED")
 boot:RegisterEvent("PLAYER_REGEN_ENABLED")
@@ -1447,6 +1654,10 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 	elseif event == "PLAYER_LOGIN" then
 		PullSelf()
 		BindLibOpenRaid()
+		if IsInGuild() then
+			if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
+			elseif GuildRoster then GuildRoster() end
+		end
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		C_Timer.After(2, function()
 			PullSelf()
@@ -1456,7 +1667,15 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			if LSP and IsInGroup() and LSP.RequestGroupSpecialization then
 				pcall(LSP.RequestGroupSpecialization)
 			end
+			if IsInGuild() then
+				if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
+				elseif GuildRoster then GuildRoster() end
+			end
 		end)
+	elseif event == "GUILD_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
+		RebuildGuildSet()
+		PersistAllTracked()
+		if mainFrame and mainFrame:IsShown() then ns.Refresh() end
 	elseif event == "GROUP_ROSTER_UPDATE" then
 		C_Timer.After(1, function()
 			if LKS and IsInGroup() then LKS.Request("PARTY") end
