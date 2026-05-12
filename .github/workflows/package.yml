@@ -53,12 +53,15 @@ jobs:
           cd build
           zip -r -9 "SeanKeys-${{ steps.ver.outputs.version }}.zip" SeanKeys
 
-      - name: Attach to GitHub Release
+      - name: Create release and attach zip
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/SeanKeys-${{ steps.ver.outputs.version }}.zip
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "build/SeanKeys-${{ steps.ver.outputs.version }}.zip" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
 
       - name: Upload as workflow artifact
         if: github.event_name == 'workflow_dispatch'
