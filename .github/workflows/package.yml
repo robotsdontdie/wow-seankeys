@@ -1,0 +1,68 @@
+name: Package addon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string for the zip / TOC (without leading v)"
+        required: true
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write   # needed to attach the zip to a GitHub Release
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            ref="${GITHUB_REF_NAME}"
+            version="${ref#v}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Packaging version: ${version}"
+
+      - name: Stage addon files
+        run: |
+          mkdir -p build/SeanKeys
+          rsync -a \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.claude/' \
+            --exclude='.gitignore' \
+            --exclude='CLAUDE.md' \
+            --exclude='build/' \
+            ./ build/SeanKeys/
+          # Substitute the Version field in the TOC so /reload reports the
+          # actual packaged version instead of whatever was committed.
+          sed -i "s/^## Version: .*/## Version: ${{ steps.ver.outputs.version }}/" build/SeanKeys/SeanKeys.toc
+
+      - name: Create zip
+        run: |
+          cd build
+          zip -r -9 "SeanKeys-${{ steps.ver.outputs.version }}.zip" SeanKeys
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/SeanKeys-${{ steps.ver.outputs.version }}.zip
+          generate_release_notes: true
+
+      - name: Upload as workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeanKeys-${{ steps.ver.outputs.version }}
+          path: build/SeanKeys-${{ steps.ver.outputs.version }}.zip
