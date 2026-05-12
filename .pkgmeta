@@ -1,0 +1,7 @@
+package-as: SeanKeys
+
+ignore:
+  - .github
+  - .claude
+  - CLAUDE.md
+  - .gitignore

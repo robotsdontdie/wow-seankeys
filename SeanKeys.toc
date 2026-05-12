@@ -2,7 +2,7 @@
 ## Title: SeanKeys
 ## Notes: Cross-protocol Mythic+ keystone viewer with teleport buttons.
 ## Author: Sean
-## Version: 0.1.0
+## Version: @project-version@
 ## SavedVariables: SeanKeysDB
 ## SavedVariablesPerCharacter: SeanKeysCharDB
 ## OptionalDeps: Details, AstralKeys, DBM-Core, BigWigs
