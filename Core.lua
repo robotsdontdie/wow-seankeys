@@ -178,16 +178,9 @@ local function GetClassColor(class)
 	return 0.8, 0.8, 0.8
 end
 
+-- TODO optionally introduce key level colors
 local function KeyLevelColor(level)
-	if not level or level < 2 then return 0.6, 0.6, 0.6 end
-	if C_ChallengeMode and C_ChallengeMode.GetKeystoneLevelRarityColor then
-		local col = C_ChallengeMode.GetKeystoneLevelRarityColor(level)
-		if col then return col.r, col.g, col.b end
-	end
-	if level >= 20 then return 1.0, 0.5, 0.0
-	elseif level >= 16 then return 0.64, 0.21, 0.93
-	elseif level >= 10 then return 0.0, 0.44, 0.87
-	else return 0.12, 1.0, 0.0 end
+	return 1.0, 1.0, 1.0
 end
 
 local ROLE_TEX = "Interface\\LFGFrame\\UI-LFG-ICON-PORTRAITROLES"

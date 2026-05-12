@@ -89,7 +89,7 @@ local function CreateRow(parent, index)
 	-- Role icon
 	row.role = row:CreateTexture(nil, "ARTWORK")
 	row.role:SetSize(ROW_HEIGHT - 4, ROW_HEIGHT - 4)
-	row.role:SetPoint("LEFT", 4, 0)
+	row.role:SetPoint("LEFT", 8, 0)
 
 	-- Spec icon
 	row.specIcon = row:CreateTexture(nil, "ARTWORK")
@@ -141,22 +141,18 @@ local function CreateRow(parent, index)
 	btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	row.teleport = btn
 
-	-- Right cluster: source -> rating -> level, anchored right-to-left from the row's right edge.
-	row.source = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	row.source:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-	row.source:SetWidth(64)
-	row.source:SetJustifyH("RIGHT")
-	row.source:SetWordWrap(false)
-
+	-- Right cluster: rating -> level, anchored right-to-left from the row's right edge.
 	row.rating = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.rating:SetPoint("RIGHT", row.source, "LEFT", -6, 0)
+	row.rating:SetPoint("RIGHT", row, "RIGHT", -16, 0)
 	row.rating:SetWidth(50)
 	row.rating:SetJustifyH("CENTER")
 
-	row.level = row:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	-- Custom Skurri-based font (defined at file scope above): bold, chunky,
+	-- tabular digits so 1- vs 2-digit levels stay aligned.
+	row.level = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightMedium")
 	row.level:SetPoint("RIGHT", row.rating, "LEFT", -6, 0)
 	row.level:SetWidth(30)
-	row.level:SetJustifyH("CENTER")
+	row.level:SetJustifyH("LEFT")
 
 	-- Upgrade arrow sits in the gap to the right of the level number.
 	-- It's a Frame (not a bare Texture) so it can capture mouse hover for a tooltip.
@@ -335,16 +331,15 @@ local function BuildFrame()
 		fs:SetText("|cffffcc00" .. text .. "|r")
 		return fs
 	end
-	-- align to row layout:
-	--   role(4..22) spec(26..44) name(48..188) tp_btn(196..216) dungeon(220..392)
-	--   lvl(400..430) rating(436..486) source(492..556)
-	H("",       4,   18)         -- role
+	-- align to row layout (row width 560 = FRAME_W - 20):
+	--   role(8..26) spec(26..44) name(48..188) tp_btn(196..216) dungeon(220..452)
+	--   lvl(458..488) rating(494..544) — 16px right padding to row edge
+	H("",       8,   18)         -- role
 	H("",       26,  18)         -- spec
 	H("Player", 48,  140, "LEFT")
 	H("Key",    220, 172, "LEFT")
-	H("Lvl",    400, 30,  "CENTER")
-	H("Rating", 436, 50,  "CENTER")
-	H("Source", 492, 64,  "RIGHT")
+	H("Lvl",    458, 30,  "LEFT")
+	H("Rating", 494, 50,  "CENTER")
 
 	for i = 1, MAX_ROWS do
 		rows[i] = CreateRow(f, i)
@@ -510,8 +505,6 @@ local function PopulateRow(row, fullName, rowIdx, section)
 	else
 		row.rating:SetText("|cff666666-|r")
 	end
-
-	row.source:SetText(entry.source and ("|cff666666" .. entry.source .. "|r") or "")
 
 	local spellID = ns.TELEPORT_SPELL_BY_CHALLENGEMAP[entry.mapID or 0]
 	SetTeleportButton(row.teleport, spellID)
