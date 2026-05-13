@@ -68,7 +68,7 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 
 ## Slash commands
 
-- `/sk` or `/seankeys` — toggle main window
+- `/sk`, `/seankeys`, or `/keys` — toggle main window
 - `/sk refresh` — force re-pull from all protocols
 - `/sk debug` — toggle the in-frame "Debug" button (persists in `SeanKeysDB.showDebugButton`)
 - `/sk dump` — print current keystone store to chat
@@ -175,6 +175,9 @@ Rows in the main window are NOT positioned at fixed offsets at creation — `Cre
 - Key level font: custom `SeanKeysLevelFont` = Skurri 16pt with `THICKOUTLINE`. Skurri is WoW's combat-text font; THICKOUTLINE gives bold weight (Friz Quadrata, the default UI font, has no bold variant).
 - Cache-only entries: dungeon name rendered in grey `|cff888888...|r` to signal stale data (but the rest of the row stays in normal colors).
 
+### ESC to close
+All three windows register their global names in `UISpecialFrames` at build time. Pressing ESC walks that table and hides the first visible entry — standard Blizzard pattern, no panel-manager interaction (so no taint propagation risk). Registration happens once inside each `BuildFrame`/`ShowDebugWindow` (idempotent because BuildFrame early-returns on subsequent calls).
+
 ### Combat lockdown
 - Resize grip uses `f:StartSizing("BOTTOMRIGHT")` — fine in combat.
 - Secure attribute changes are queued via `pendingButtonUpdates`.
@@ -191,7 +194,7 @@ Rows in the main window are NOT positioned at fixed offsets at creation — `Cre
 - Role icon texcoords are hardcoded in `ROLE_TEXCOORDS` because `GetTexCoordsForRoleSmallCircle` was removed from retail at some point.
 - Upgrade arrow is `Interface\Tooltips\ReforgeGreenArrow` rotated `math.pi/2` CCW (texture ships pointing right).
 - Wishlist stars use atlas `auctionhouse-icon-favorite` (the same gold star Blizzard uses on the auction house favorites toggle).
-- Main-frame padding: role icon at x=8 (left padding), rating anchored at row-right -16 (right padding); column headers at `role(8) spec(26) Player(48) Key(220) Lvl(458) Rating(494)`.
+- Main-frame padding: role icon at x=8 (left padding), rating anchored at row-right -16 (right padding); column headers at `role(8) spec(30) Player(52) Key(220) Lvl(458) Rating(494)`. The 4px gap between role→spec mirrors the spec→name gap.
 
 ## Testing workflow
 

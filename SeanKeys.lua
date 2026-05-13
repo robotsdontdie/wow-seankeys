@@ -53,6 +53,7 @@ ns.TELEPORT_SPELL_BY_CHALLENGEMAP = {
 
 SLASH_SEANKEYS1 = "/seankeys"
 SLASH_SEANKEYS2 = "/sk"
+SLASH_SEANKEYS3 = "/keys"
 
 local function UpdateDebugButtonVisibility()
 	if not ns.mainFrame or not ns.mainFrame.debugBtn then return end

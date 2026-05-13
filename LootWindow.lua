@@ -312,6 +312,7 @@ end
 local function BuildLootFrame()
 	if lootFrame then return lootFrame end
 	local f = CreateFrame("Frame", "SeanKeysLootFrame", UIParent, "PortraitFrameTemplate")
+	tinsert(UISpecialFrames, "SeanKeysLootFrame")  -- ESC closes
 	-- height = chrome + gear rows + other-items section + footer
 	local otherSectionH = 24 + (OTHER_ICON_SIZE + 4) * OTHER_MAX_ROWS
 	f:SetSize(LOOT_FRAME_W, 80 + LOOT_ROW_H * LOOT_NUM_GEAR_ROWS + otherSectionH + 24)

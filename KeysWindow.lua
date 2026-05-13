@@ -165,13 +165,13 @@ local function CreateRow(parent, index)
 	-- Spec icon
 	row.specIcon = row:CreateTexture(nil, "ARTWORK")
 	row.specIcon:SetSize(ROW_HEIGHT - 4, ROW_HEIGHT - 4)
-	row.specIcon:SetPoint("LEFT", 26, 0)
+	row.specIcon:SetPoint("LEFT", 30, 0)
 	row.specIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
 	-- Name button (click to copy Raider.IO URL). Not secure - simple OnClick.
 	local nameBtn = CreateFrame("Button", "SeanKeysNameBtn" .. index, row)
 	nameBtn:SetSize(140, ROW_HEIGHT)
-	nameBtn:SetPoint("LEFT", row, "LEFT", 48, 0)
+	nameBtn:SetPoint("LEFT", row, "LEFT", 52, 0)
 	nameBtn:RegisterForClicks("AnyUp")
 	nameBtn.text = nameBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	nameBtn.text:SetPoint("LEFT")
@@ -308,6 +308,8 @@ local function BuildFrame()
 	if mainFrame then return mainFrame end
 
 	local f = CreateFrame("Frame", "SeanKeysFrame", UIParent, "PortraitFrameTemplate")
+	-- Hitting ESC walks UISpecialFrames and hides the first visible entry.
+	tinsert(UISpecialFrames, "SeanKeysFrame")
 	f:SetSize(FRAME_W, FRAME_H)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("MEDIUM")
@@ -422,11 +424,11 @@ local function BuildFrame()
 		return fs
 	end
 	-- align to row layout (row width 560 = FRAME_W - 20):
-	--   role(8..26) spec(26..44) name(48..188) tp_btn(196..216) dungeon(220..452)
+	--   role(8..26) spec(30..48) name(52..192) tp_btn(196..216) dungeon(220..452)
 	--   lvl(458..488) rating(494..544) — 16px right padding to row edge
 	H("",       8,   18)         -- role
-	H("",       26,  18)         -- spec
-	H("Player", 48,  140, "LEFT")
+	H("",       30,  18)         -- spec
+	H("Player", 52,  140, "LEFT")
 	H("Key",    220, 172, "LEFT")
 	H("Lvl",    458, 30,  "LEFT")
 	H("Rating", 494, 50,  "CENTER")

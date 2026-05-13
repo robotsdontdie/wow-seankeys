@@ -27,6 +27,7 @@ local debugFrame
 local function ShowDebugWindow()
 	if not debugFrame then
 		local f = CreateFrame("Frame", "SeanKeysDebugFrame", UIParent, "PortraitFrameTemplate")
+		tinsert(UISpecialFrames, "SeanKeysDebugFrame")  -- ESC closes
 		f:SetSize(640, 440)
 		f:SetPoint("CENTER")
 		f:SetFrameStrata("MEDIUM")
