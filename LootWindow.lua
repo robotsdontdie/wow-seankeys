@@ -265,6 +265,34 @@ local OTHER_MAX_ROWS = 2
 local OTHER_MAX_ICONS = OTHER_ICONS_PER_ROW * OTHER_MAX_ROWS
 local lootFrame, lootRows, otherIcons
 
+-- State for the active loot view. Reset on each ShowLootFor (per the spec
+-- "default to current spec"). The spec selector dropdown mutates
+-- activeClassID/activeSpecID and calls RenderLoot to refresh in place.
+local activeMapID, activeKeyLevel, activeJournalID
+local activeClassID, activeSpecID
+
+-- Forward declarations: BuildLootFrame's OnClick captures ShowSpecMenu before
+-- the function is defined. Declaring them as file-locals up here lets the
+-- closure bind to the same upvalue we later assign.
+local UpdateSpecSelectorText, ShowSpecMenu, RenderLoot
+
+local function ClassDisplay(classID)
+	if not classID then return nil, nil end
+	local info = C_CreatureInfo and C_CreatureInfo.GetClassInfo and C_CreatureInfo.GetClassInfo(classID)
+	if info then return info.className, info.classFile end
+	for i = 1, GetNumClasses() do
+		local n, file, id = GetClassInfo(i)
+		if id == classID then return n, file end
+	end
+	return nil, nil
+end
+
+local function SpecName(specID)
+	if not specID then return nil end
+	local _, name = GetSpecializationInfoByID(specID)
+	return name
+end
+
 -- Use C_Item.GetItemInfoInstant — synchronous, doesn't require item to be cached,
 -- and returns reliable classID + equipLoc regardless of how the EJ struct is populated.
 local function IsGearItem(info)
@@ -334,9 +362,32 @@ local function BuildLootFrame()
 	-- Title and portrait set per-dungeon by ShowLootFor.
 	if f.Inset and f.Inset.Bg then f.Inset.Bg:SetAlpha(0.7) end
 
-	f.subtitle = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	f.subtitle:SetPoint("TOP", 0, -28)
-	f.subtitle:SetText("")
+	-- Clickable subtitle: shows the active class+spec+preview level and opens
+	-- a class>spec context menu when clicked. The text is set by
+	-- UpdateSpecSelectorText below.
+	f.specSelector = CreateFrame("Button", nil, f)
+	f.specSelector:SetSize(LOOT_FRAME_W - 60, 22)
+	f.specSelector:SetPoint("TOP", 0, -28)
+	f.specSelector.text = f.specSelector:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	f.specSelector.text:SetPoint("LEFT", 8, 0)
+	f.specSelector.text:SetPoint("RIGHT", -16, 0)
+	f.specSelector.text:SetJustifyH("CENTER")
+	-- Subtle dropdown indicator on the right edge.
+	f.specSelector.arrow = f.specSelector:CreateTexture(nil, "OVERLAY")
+	f.specSelector.arrow:SetSize(10, 10)
+	f.specSelector.arrow:SetPoint("RIGHT", f.specSelector, "RIGHT", -2, -1)
+	f.specSelector.arrow:SetTexture("Interface\\ChatFrame\\ChatFrameExpandArrow")
+	-- Hover highlight (a faint white wash so it reads as a button).
+	local hl = f.specSelector:CreateTexture(nil, "HIGHLIGHT")
+	hl:SetAllPoints()
+	hl:SetColorTexture(1, 1, 1, 0.08)
+	f.specSelector:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Click to filter by a different spec", 0.7, 0.7, 0.7)
+		GameTooltip:Show()
+	end)
+	f.specSelector:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	f.specSelector:SetScript("OnClick", function(self) ShowSpecMenu(self) end)
 
 	-- Headers
 	local hdr = CreateFrame("Frame", nil, f)
@@ -551,50 +602,51 @@ local function PopulateOtherIcon(btn, lootInfo)
 	end)
 end
 
-function ns.ShowLootFor(challengeMapID, keyLevel)
-	Dbg("=== ShowLootFor invoked, challengeMapID=", challengeMapID, "keyLevel=", keyLevel, " ===")
-	local f = BuildLootFrame()
-	local dungeonName = ns.GetDungeonName(challengeMapID)
-	Dbg("dungeon name resolved:", dungeonName)
+UpdateSpecSelectorText = function(f)
+	if not f or not f.specSelector then return end
+	local className, classFile = ClassDisplay(activeClassID)
+	local specName = SpecName(activeSpecID)
+	local color = classFile and RAID_CLASS_COLORS[classFile]
+	local hex = color and color.colorStr or "ffffffff"
+	f.specSelector.text:SetText(string.format(
+		"|c%s%s %s|r  |cff888888-|r  +%d preview",
+		hex, specName or "", className or "", activeKeyLevel or 0))
+end
 
-	-- Tell the journal what M+ level to scale items to so the link includes the
-	-- correct preview ilvl. Default to the player's own key level if the row had none.
-	local previewLevel = (keyLevel and keyLevel > 0) and keyLevel or (C_MythicPlus.GetOwnedKeystoneLevel() or 0)
-	if previewLevel == 0 then previewLevel = 10 end  -- sensible fallback
-	if C_EncounterJournal and C_EncounterJournal.SetPreviewMythicPlusLevel then
-		EnsureEJLoaded()
-		C_EncounterJournal.SetPreviewMythicPlusLevel(previewLevel)
-		Dbg("SetPreviewMythicPlusLevel:", previewLevel)
+ShowSpecMenu = function(button)
+	if not MenuUtil or not MenuUtil.CreateContextMenu then
+		Dbg("ShowSpecMenu: MenuUtil unavailable")
+		return
 	end
-
-	local className, _, classID = UnitClass("player")
-	local specIdx = GetSpecialization()
-	local specID, specName = nil, nil
-	if specIdx then
-		specID, specName = GetSpecializationInfo(specIdx)
-	end
-	Dbg("player: className=", className, "classID=", classID, "specID=", specID, "specName=", specName)
-
-	-- Use the dungeon's own UI info for title text and portrait icon.
-	local mapName, _, _, mapTexture = nil, nil, nil, nil
-	if C_ChallengeMode and C_ChallengeMode.GetMapUIInfo then
-		mapName, _, _, mapTexture = C_ChallengeMode.GetMapUIInfo(challengeMapID)
-	end
-	local displayName = mapName or dungeonName or "Dungeon"
-	local titleText = displayName .. " Loot"
-	if f.SetTitle then f:SetTitle(titleText) elseif f.TitleText then f.TitleText:SetText(titleText) end
-	if mapTexture then
-		if f.SetPortraitToAsset then
-			f:SetPortraitToAsset(mapTexture)
-		elseif f.portrait then
-			f.portrait:SetTexture(mapTexture)
-		elseif f.PortraitContainer and f.PortraitContainer.portrait then
-			f.PortraitContainer.portrait:SetTexture(mapTexture)
+	MenuUtil.CreateContextMenu(button, function(owner, root)
+		root:CreateTitle("Filter loot by spec")
+		for i = 1, GetNumClasses() do
+			local className, classFile, classID = GetClassInfo(i)
+			local color = RAID_CLASS_COLORS[classFile]
+			local label = color and string.format("|c%s%s|r", color.colorStr, className) or className
+			local classMenu = root:CreateButton(label)
+			for s = 1, GetNumSpecializationsForClassID(classID) do
+				local specID, specName = GetSpecializationInfoForClassID(classID, s)
+				classMenu:CreateRadio(
+					specName,
+					function() return activeSpecID == specID end,
+					function()
+						activeClassID = classID
+						activeSpecID = specID
+						RenderLoot()
+					end)
+			end
 		end
-	end
+	end)
+end
 
-	local journalID = GetJournalInstance(challengeMapID)
-	f.subtitle:SetText(string.format("%s %s  |cff888888-|r  +%d preview", specName or "", className, previewLevel))
+-- Re-fetch and re-render the loot grid for the active dungeon + spec. Safe to
+-- call repeatedly without re-resolving the journal instance — used both by
+-- ShowLootFor (initial render) and the spec selector dropdown (re-render).
+RenderLoot = function()
+	local f = lootFrame
+	if not f then return end
+	UpdateSpecSelectorText(f)
 
 	local function HideAll()
 		for i = 1, LOOT_NUM_GEAR_ROWS do lootRows[i]:Hide() end
@@ -602,16 +654,20 @@ function ns.ShowLootFor(challengeMapID, keyLevel)
 		f.otherHeading:Hide()
 	end
 
-	if not journalID then
+	if not activeJournalID then
 		f.hint:SetText("|cffff6666Couldn't resolve journal instance. Check Debug log.|r")
 		HideAll()
-		f:Show()
 		return
 	end
 
-	local loot = GatherLoot(journalID, classID, specID)
+	-- Update the journal's preview-level state to the active key level so item
+	-- links return the correct ilvl scaling.
+	if C_EncounterJournal and C_EncounterJournal.SetPreviewMythicPlusLevel then
+		C_EncounterJournal.SetPreviewMythicPlusLevel(activeKeyLevel)
+	end
 
-	-- Split into gear (slot-bearing) and "other" (crafting mats, tokens, etc.)
+	local loot = GatherLoot(activeJournalID, activeClassID, activeSpecID)
+
 	local gear, other = {}, {}
 	for idx, info in ipairs(loot) do
 		local isGear = IsGearItem(info)
@@ -627,11 +683,11 @@ function ns.ShowLootFor(challengeMapID, keyLevel)
 				"-> ", isGear and "GEAR" or "other")
 		end
 	end
-	Dbg("ShowLootFor: split", #gear, "gear,", #other, "other")
+	Dbg("RenderLoot: split", #gear, "gear,", #other, "other")
 
 	HideAll()
 	for i = 1, math.min(#gear, LOOT_NUM_GEAR_ROWS) do
-		PopulateLootRow(lootRows[i], gear[i], challengeMapID)
+		PopulateLootRow(lootRows[i], gear[i], activeMapID)
 	end
 	if #other > 0 then
 		f.otherHeading:Show()
@@ -655,5 +711,49 @@ function ns.ShowLootFor(challengeMapID, keyLevel)
 	if #gear == 0 and #other == 0 then
 		f.hint:SetText("|cffff6666No loot returned for this spec.|r")
 	end
+end
+
+function ns.ShowLootFor(challengeMapID, keyLevel)
+	Dbg("=== ShowLootFor invoked, challengeMapID=", challengeMapID, "keyLevel=", keyLevel, " ===")
+	local f = BuildLootFrame()
+	local dungeonName = ns.GetDungeonName(challengeMapID)
+	Dbg("dungeon name resolved:", dungeonName)
+
+	-- Reset spec to player's current on each (re-)open of the loot window.
+	local _, _, classID = UnitClass("player")
+	local specIdx = GetSpecialization()
+	local specID = specIdx and (GetSpecializationInfo(specIdx)) or nil
+	activeClassID = classID
+	activeSpecID = specID
+	activeMapID = challengeMapID
+	activeKeyLevel = (keyLevel and keyLevel > 0) and keyLevel or (C_MythicPlus.GetOwnedKeystoneLevel() or 0)
+	if activeKeyLevel == 0 then activeKeyLevel = 10 end
+	Dbg("player: classID=", classID, "specID=", specID, "previewLevel=", activeKeyLevel)
+
+	if C_EncounterJournal and C_EncounterJournal.SetPreviewMythicPlusLevel then
+		EnsureEJLoaded()
+		C_EncounterJournal.SetPreviewMythicPlusLevel(activeKeyLevel)
+	end
+
+	-- Use the dungeon's own UI info for title text and portrait icon.
+	local mapName, _, _, mapTexture = nil, nil, nil, nil
+	if C_ChallengeMode and C_ChallengeMode.GetMapUIInfo then
+		mapName, _, _, mapTexture = C_ChallengeMode.GetMapUIInfo(challengeMapID)
+	end
+	local displayName = mapName or dungeonName or "Dungeon"
+	local titleText = displayName .. " Loot"
+	if f.SetTitle then f:SetTitle(titleText) elseif f.TitleText then f.TitleText:SetText(titleText) end
+	if mapTexture then
+		if f.SetPortraitToAsset then
+			f:SetPortraitToAsset(mapTexture)
+		elseif f.portrait then
+			f.portrait:SetTexture(mapTexture)
+		elseif f.PortraitContainer and f.PortraitContainer.portrait then
+			f.PortraitContainer.portrait:SetTexture(mapTexture)
+		end
+	end
+
+	activeJournalID = GetJournalInstance(challengeMapID)
+	RenderLoot()
 	f:Show()
 end
