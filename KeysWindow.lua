@@ -311,7 +311,20 @@ local function BuildFrame()
 	f:SetSize(FRAME_W, FRAME_H)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("MEDIUM")
-	f:SetToplevel(true)
+	-- Sit above most other MEDIUM-strata addon frames (cooldown managers, etc.)
+	-- without using :Raise() — :Raise() walks sibling frame levels and that
+	-- walk propagates SeanKeys taint into UIParent's panel manager, which
+	-- later errors on the player health bar's secret-number compare in
+	-- TextStatusBar.UpdateTextStringWithValues. SetFrameLevel writes a single
+	-- property on the target frame only, no sibling scan. SetToplevel(true)
+	-- is also avoided for the same panel-manager taint reason.
+	-- PromoteFrameLevels recursively bumps child frames built by
+	-- PortraitFrameTemplate (portrait container, close button, inset, ...)
+	-- so the entire window — chrome included — sits at the high level. See
+	-- Core.lua for why a plain SetFrameLevel on the parent is insufficient.
+	-- 2000 puts us above UnhaltedUnitFrames' HighLevelContainer (level 999)
+	-- and gives plenty of headroom for other addons.
+	ns.PromoteFrameLevels(f, 2000)
 	f:SetMovable(true)
 	f:EnableMouse(true)
 	f:SetClampedToScreen(true)
@@ -497,11 +510,60 @@ local function CollectGuildies(excludeSet)
 	return list
 end
 
+-- Resolve the entry for a player by merging the in-memory `keys` store with
+-- the persistent cache. The cache is updated on every `UpsertKey` for
+-- self/guild, so `cached.level > 0` reliably means "the most recent positive
+-- key we've ever recorded for this player." We let live override the cached
+-- key only when live itself carries a positive key — otherwise (offline
+-- party member, stale `level=0` from LibOpenRaid's snapshot, periodic
+-- "no key" broadcast that hasn't yet been refreshed by a real key, etc.)
+-- the cached value wins and renders greyed to signal it's stale.
+--
+-- Spec / role / class always come from live when present, since they reflect
+-- the current session.
+--
+-- Returns: (entry, isLiveKey, shortName)
+--   isLiveKey is true only when the displayed key info came from a live
+--   positive broadcast this session; cache-sourced key info renders greyed.
 local function EntryFor(fullName)
 	local shortName = Ambiguate(fullName, "none")
 	local live = ns.keys[shortName]
 	local cached = ns.db and ns.db.cache and ns.db.cache[fullName]
-	return live or cached or {}, (live ~= nil), shortName
+
+	if not live and not cached then return {}, false, shortName end
+	if not cached then return live, true, shortName end
+	if not live then return cached, false, shortName end
+
+	local merged = {}
+	for k, v in pairs(cached) do merged[k] = v end
+	if live.specID then merged.specID = live.specID end
+	if live.role then merged.role = live.role end
+	if live.class then merged.class = live.class end
+	if live.lastSeen then merged.lastSeen = live.lastSeen end
+
+	local liveLevel = live.level or 0
+	local cachedLevel = cached.level or 0
+
+	if liveLevel > 0 then
+		merged.level = live.level
+		merged.mapID = live.mapID
+		merged.rating = live.rating or merged.rating
+		merged.source = live.source
+		return merged, true, shortName
+	end
+
+	if cachedLevel > 0 then
+		-- Cached has a positive key; live doesn't. Keep cached's key fields
+		-- (already in merged from the initial copy). Mark not-live so the
+		-- dungeon name renders greyed.
+		return merged, false, shortName
+	end
+
+	-- Both sides have no positive key. Carry live.source forward so
+	-- PopulateRow can distinguish "no key" (source set = explicit empty
+	-- broadcast received) from "unknown" (no source = bare shell).
+	if live.source then merged.source = live.source end
+	return merged, true, shortName
 end
 
 local function SortByLevelDesc(list)
@@ -569,7 +631,12 @@ local function PopulateRow(row, fullName, rowIdx, section)
 		row.upgrade.candidateLevel = lvl
 		if upgrade then row.upgrade:Show() else row.upgrade:Hide() end
 	else
-		row.dungeon.text:SetText("|cff888888no key|r")
+		-- "no key" = we have an explicit broadcast on file saying level=0.
+		-- "unknown" = we have nothing on file (e.g. a party member whose
+		-- addon hasn't broadcast yet). entry.source is set by every real
+		-- broadcast path and unset on bare shells from CollectPartyNames.
+		local label = entry.source and "no key" or "unknown"
+		row.dungeon.text:SetText("|cff888888" .. label .. "|r")
 		row.level:SetText("")
 		row.upgrade.mapID = nil
 		row.upgrade.candidateLevel = nil
@@ -685,7 +752,6 @@ local function Toggle()
 	else
 		ns.Refresh(true)
 		mainFrame:Show()
-		mainFrame:Raise()
 	end
 end
 

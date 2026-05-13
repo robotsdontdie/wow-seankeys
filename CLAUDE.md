@@ -72,6 +72,7 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - `/sk refresh` — force re-pull from all protocols
 - `/sk debug` — toggle the in-frame "Debug" button (persists in `SeanKeysDB.showDebugButton`)
 - `/sk dump` — print current keystone store to chat
+- `/sk levels` — log current frame-level state of all SeanKeys windows to the debug log and open the debug window (diagnostic for layering issues)
 
 ## Saved variables
 
@@ -100,10 +101,29 @@ Three places have season-specific data:
 ## Tricky bits / gotchas
 
 ### Frame strata
-All three top-level frames (main, loot, debug) are at `MEDIUM` strata with `SetToplevel(true)` and `Raise()` on show. Earlier versions used HIGH/DIALOG which caused content to render in front of Blizzard panels the user opened on top. MEDIUM matches the standard Blizzard panel level (character pane, spellbook, etc.).
+All three top-level frames are at `MEDIUM` strata with frame levels assigned via `ns.PromoteFrameLevels` at build time: keys = 2000, loot = 2100, debug = 2200. The 100-apart spacing keeps each window's chrome range well clear of the next window's parent level. Earlier versions used HIGH/DIALOG which caused content to render in front of Blizzard panels the user opened on top. MEDIUM matches the standard Blizzard panel level; a high baseline keeps us above other MEDIUM-strata addon overlays — the 2000 floor was chosen specifically because UnhaltedUnitFrames creates a `HighLevelContainer` at level 999 in MEDIUM (where it parks health/resource text, leader/rested icons, etc.), and TweaksUI_Cooldowns child icons climb to ~115 above their level-100 parents. Blizzard panels still render on top because their XML sets `toplevel="true"`, which the frame engine enforces above any fixed level.
+
+`ns.PromoteFrameLevels(frame, baseLevel)` (in Core.lua) recursively assigns each descendant `baseLevel + depth * 10` rather than preserving the template's original relative offsets. This is intentional and surprising: `PortraitFrameTemplate` builds its chrome (PortraitContainer, CloseButton, Inset, ...) at absolute frame levels in the **2300-2530** range with slightly different bases per instance — so a single additive offset stretches each window's chrome into a 4000+ band that overlaps with other SeanKeys windows' chrome bands. The result was visual interleaving: debug's chrome (~4540) covered keys's content (~2001), but keys's chrome (~4500) covered debug's content (~2021). Depth-based assignment collapses each window into a tight, predictable range — keys at 2000-2030, loot at 2100-2130, debug at 2200-2230 — so each window is wholly above the previous one. Later-added content (rows, scroll children) inherits parent+1 (2001, 2101, 2201) and sits below its own window's chrome; that's fine because chrome and content don't share screen geometry. PromoteFrameLevels is taint-safe because it only writes a property on its own frames; it never enumerates or compares siblings the way `:Raise()` does.
+
+Flattening has one wrinkle: the close button was originally one level **above** its sibling `NineSliceFrame` (2509 vs 2499) so the X icon rendered on top of the border art. Collapsing both to the same level lets the border's texture win the render-order tiebreaker and the X disappears. After the depth pass, `PromoteFrameLevels` explicitly lifts `frame.CloseButton` and its subtree to `baseLevel + 50` so the X is reliably on top of the chrome. The +50 lift keeps each window's close button still safely below the next window's parent level (100 apart).
+
+Both `SetToplevel(true)` and `:Raise()` on show were removed because each one propagates SeanKeys taint into UIParent's panel manager:
+- `SetToplevel(true)` registers the frame with the panel manager's toplevel walk.
+- `:Raise()` forces a sibling frame-level scan among other MEDIUM frames; the panel manager later does its own MEDIUM walk on `ShowUIPanel` and picks up the taint we left behind.
+
+Symptom of the leftover taint: opening the character pane (or any other panel-managed UI) while in an instance with concealed health values intermittently errors with `attempt to compare a secret number value (execution tainted by 'SeanKeys')` deep inside `TextStatusBar.UpdateTextStringWithValues`. It's intermittent because the secret-value compare only happens when player health is concealed (encounters, certain instance content), so the error can't be reproduced just by opening the character pane in town.
+
+`SetFrameLevel(N)` writes a single property on the frame and does not enumerate siblings, so it doesn't propagate taint the way `:Raise()` does. If you ever need a different layering rule (e.g. "always above this other addon"), bump 100 to a higher fixed value rather than reintroducing `:Raise()`.
 
 ### Dynamic row layout
 Rows in the main window are NOT positioned at fixed offsets at creation — `CreateRow` builds them position-less and `ns.Refresh` assigns `TOPLEFT` per visible row each tick. This is what makes the section separators work: the layout pass walks an items array (`{kind="row"|"sep", section="party|alts|guild"}`) and accumulates a y offset, inserting two pre-built `separators` between non-empty sections. Rows that overflow the visible content area are simply not positioned (and stay hidden).
+
+### Live vs cached key resolution
+`EntryFor(fullName)` in `KeysWindow.lua` merges the in-memory `keys[]` store with `ns.db.cache[]`. Three rules:
+
+- **Spec / role / class always come from live when present.** They reflect the current session and shouldn't be overridden by a stale cache.
+- **Whichever side has a positive key wins for level/mapID/rating.** `live.level > 0` overrides cached; otherwise `cached.level > 0` is used (and the dungeon name renders greyed to signal stale). The cache is updated on every `UpsertKey` for self/guild via `PersistEntry`, so `cached.level > 0` reliably means "the most recent positive key we ever recorded for this player." This intentionally outranks a live `level=0` broadcast — a `0` from LibOpenRaid's snapshot or a bare-shell entry with `source` accidentally set should not erase a known-good cached key. The trade-off: if a guildie genuinely turns in their key mid-session, we keep displaying the old cached value until a new positive broadcast arrives.
+- **`PopulateRow` distinguishes "no key" from "unknown" via `entry.source`.** When both live and cached are at level 0: source set = "no key" (we received an explicit broadcast saying they don't have one); source unset = "unknown" (we have no broadcast on file, e.g. a party member whose addon hasn't reported yet). `CollectPartyNames` creates bare shells (`level=0`, no `source`) for party members so we can render their roster row before any keystone broadcast arrives.
 
 ### Secure frames
 - **Teleport buttons** use `SecureActionButtonTemplate` with `type="spell"`. Attribute writes are blocked during combat; updates are queued in `pendingButtonUpdates` and applied on `PLAYER_REGEN_ENABLED` (via `ns.ProcessPending`).

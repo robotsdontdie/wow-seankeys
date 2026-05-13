@@ -317,7 +317,12 @@ local function BuildLootFrame()
 	f:SetSize(LOOT_FRAME_W, 80 + LOOT_ROW_H * LOOT_NUM_GEAR_ROWS + otherSectionH + 24)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("MEDIUM")
-	f:SetToplevel(true)
+	-- Higher than the keys window's 500 so the loot popup floats above it
+	-- when both are on screen. PromoteFrameLevels also bumps the template
+	-- children so the portrait/close button don't render under other addons.
+	-- See KeysWindow.lua BuildFrame and Core.lua PromoteFrameLevels for the
+	-- full rationale.
+	ns.PromoteFrameLevels(f, 2100)
 	f:SetMovable(true)
 	f:EnableMouse(true)
 	f:SetClampedToScreen(true)
@@ -600,7 +605,6 @@ function ns.ShowLootFor(challengeMapID, keyLevel)
 		f.hint:SetText("|cffff6666Couldn't resolve journal instance. Check Debug log.|r")
 		HideAll()
 		f:Show()
-		f:Raise()
 		return
 	end
 
@@ -651,5 +655,4 @@ function ns.ShowLootFor(challengeMapID, keyLevel)
 		f.hint:SetText("|cffff6666No loot returned for this spec.|r")
 	end
 	f:Show()
-	f:Raise()
 end

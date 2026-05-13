@@ -30,7 +30,12 @@ local function ShowDebugWindow()
 		f:SetSize(640, 440)
 		f:SetPoint("CENTER")
 		f:SetFrameStrata("MEDIUM")
-		f:SetToplevel(true)
+		-- Highest of the three SeanKeys windows so the debug log can sit above
+		-- both the keys and loot windows. PromoteFrameLevels also bumps the
+		-- template children so the portrait/close button don't get hidden
+		-- behind the keys window. See PromoteFrameLevels in this file for
+		-- why a plain SetFrameLevel on the parent is insufficient.
+		ns.PromoteFrameLevels(f, 2200)
 		f:SetMovable(true)
 		f:EnableMouse(true)
 		f:SetClampedToScreen(true)
@@ -78,7 +83,6 @@ local function ShowDebugWindow()
 	end
 	debugFrame.editBox:SetText(table.concat(debugLog, "\n"))
 	debugFrame:Show()
-	debugFrame:Raise()
 	C_Timer.After(0, function()
 		-- scroll to bottom after Blizzard recalculates content height
 		local sf = debugFrame.scrollFrame
@@ -89,6 +93,96 @@ end
 
 ns.Dbg = Dbg
 ns.ShowDebugWindow = ShowDebugWindow
+
+-- ----------------------------------------------------------------------------
+-- Frame-level promotion
+-- ----------------------------------------------------------------------------
+
+-- Lift a frame and every descendant to a controlled, tightly-packed level
+-- range starting at `baseLevel` — used to keep all three SeanKeys windows
+-- above MEDIUM-strata addon overlays without falling foul of two surprises:
+--
+-- 1. `PortraitFrameTemplate` builds its child frames (PortraitContainer,
+--    CloseButton, NineSliceFrame, TitleContainer) at absolute levels in the
+--    2300-2530 range, with slightly different bases per instance. A plain
+--    additive offset on the parent leaves the chrome at 4000+ and our
+--    later-added rows at parent+1 (~2001). Two SeanKeys windows then
+--    interleave: each window's chrome (~4500) covers the other window's
+--    content (~2001/~2021) but not each other.
+--    Fix: depth-based reassignment — parent at baseLevel, depth-1 children
+--    at +10, depth-2 at +20, etc. Spacing windows 100 apart guarantees
+--    every level of one window sits cleanly above the previous window.
+--
+-- 2. Inside the template, `CloseButton` was originally one level above its
+--    sibling `NineSliceFrame` (2509 vs 2499) so the X icon rendered on top
+--    of the border art. Flattening collapses both to the same level (+10);
+--    the border then wins the render-order tiebreaker and the X disappears.
+--    Fix: after the depth-based pass, explicitly bump `frame.CloseButton`
+--    above the rest of the chrome.
+--
+-- Both fixes are taint-safe: we only set levels on frames we own, no
+-- sibling enumeration (unlike `:Raise()`).
+function ns.PromoteFrameLevels(frame, baseLevel)
+	if not frame or not frame.GetFrameLevel then return end
+	local rootName = frame:GetName() or "(unnamed)"
+	Dbg(string.format("PromoteFrameLevels: root=%s baseLevel=%d", rootName, baseLevel))
+	local count, maxDepth = 0, 0
+	local function recurse(f, depth)
+		count = count + 1
+		if depth > maxDepth then maxDepth = depth end
+		f:SetFrameLevel(baseLevel + depth * 10)
+		if f.GetChildren then
+			local children = { f:GetChildren() }
+			for i = 1, #children do recurse(children[i], depth + 1) end
+		end
+	end
+	recurse(frame, 0)
+	-- Lift the close button (and its subtree) above the rest of the chrome
+	-- so the X icon isn't covered by the NineSlice border at the same level.
+	if frame.CloseButton then
+		local closeBase = baseLevel + 50
+		local function lift(f, depth)
+			f:SetFrameLevel(closeBase + depth * 10)
+			if f.GetChildren then
+				local children = { f:GetChildren() }
+				for i = 1, #children do lift(children[i], depth + 1) end
+			end
+		end
+		lift(frame.CloseButton, 0)
+		Dbg(string.format("PromoteFrameLevels: %s.CloseButton -> %d", rootName, closeBase))
+	end
+	Dbg(string.format("PromoteFrameLevels: %s -> %d frames, max depth %d, max level %d",
+		rootName, count, maxDepth, baseLevel + maxDepth * 10))
+end
+
+-- Dumps the current frame-level state of a window's entire subtree to the
+-- debug log. Use after the window has been built and any other addons have
+-- had a chance to muck with levels — helps confirm our promotion stuck.
+function ns.DumpFrameLevels(frame)
+	if not frame or not frame.GetFrameLevel then
+		Dbg("DumpFrameLevels: no frame")
+		return
+	end
+	local rootName = frame:GetName() or "(unnamed)"
+	Dbg(string.format("DumpFrameLevels: root=%s strata=%s level=%d",
+		rootName, frame:GetFrameStrata(), frame:GetFrameLevel()))
+	local count = 0
+	local function recurse(f, depth)
+		count = count + 1
+		local name = f.GetName and f:GetName() or "(unnamed)"
+		Dbg(string.format("  %s%s: strata=%s level=%d shown=%s",
+			string.rep("  ", depth), name,
+			f.GetFrameStrata and f:GetFrameStrata() or "?",
+			f.GetFrameLevel and f:GetFrameLevel() or -1,
+			tostring(f.IsShown and f:IsShown())))
+		if f.GetChildren then
+			local children = { f:GetChildren() }
+			for i = 1, #children do recurse(children[i], depth + 1) end
+		end
+	end
+	recurse(frame, 0)
+	Dbg(string.format("DumpFrameLevels: visited %d frames", count))
+end
 
 -- ----------------------------------------------------------------------------
 -- Raider.IO URL + copy popup

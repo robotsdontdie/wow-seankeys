@@ -73,6 +73,12 @@ SlashCmdList.SEANKEYS = function(msg)
 		ns.db.showDebugButton = not ns.db.showDebugButton
 		UpdateDebugButtonVisibility()
 		print("|cffffcc00SeanKeys:|r debug button " .. (ns.db.showDebugButton and "|cff33ff33shown|r" or "|cffff6666hidden|r"))
+	elseif msg == "levels" then
+		print("|cffffcc00SeanKeys:|r dumping frame levels to debug log...")
+		if ns.mainFrame then ns.DumpFrameLevels(ns.mainFrame) end
+		if _G.SeanKeysLootFrame then ns.DumpFrameLevels(_G.SeanKeysLootFrame) end
+		if _G.SeanKeysDebugFrame then ns.DumpFrameLevels(_G.SeanKeysDebugFrame) end
+		ns.ShowDebugWindow()
 	elseif msg == "dump" then
 		for name, k in pairs(ns.keys) do
 			local upgrade, reason = ns.IsKeyUpgrade(k.mapID, k.level)
