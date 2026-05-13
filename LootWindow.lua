@@ -369,13 +369,14 @@ local function BuildLootFrame()
 	f.specSelector:SetSize(LOOT_FRAME_W - 60, 22)
 	f.specSelector:SetPoint("TOP", 0, -28)
 	f.specSelector.text = f.specSelector:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	f.specSelector.text:SetPoint("LEFT", 8, 0)
-	f.specSelector.text:SetPoint("RIGHT", -16, 0)
+	-- Center-anchored with no width constraint so the FontString sizes to its
+	-- content; the arrow anchors to the text's right edge so it sits flush with
+	-- the name regardless of how long the class/spec label is.
+	f.specSelector.text:SetPoint("CENTER")
 	f.specSelector.text:SetJustifyH("CENTER")
-	-- Subtle dropdown indicator on the right edge.
 	f.specSelector.arrow = f.specSelector:CreateTexture(nil, "OVERLAY")
 	f.specSelector.arrow:SetSize(10, 10)
-	f.specSelector.arrow:SetPoint("RIGHT", f.specSelector, "RIGHT", -2, -1)
+	f.specSelector.arrow:SetPoint("LEFT", f.specSelector.text, "RIGHT", 2, -1)
 	f.specSelector.arrow:SetTexture("Interface\\ChatFrame\\ChatFrameExpandArrow")
 	-- Hover highlight (a faint white wash so it reads as a button).
 	local hl = f.specSelector:CreateTexture(nil, "HIGHLIGHT")
@@ -608,9 +609,8 @@ UpdateSpecSelectorText = function(f)
 	local specName = SpecName(activeSpecID)
 	local color = classFile and RAID_CLASS_COLORS[classFile]
 	local hex = color and color.colorStr or "ffffffff"
-	f.specSelector.text:SetText(string.format(
-		"|c%s%s %s|r  |cff888888-|r  +%d preview",
-		hex, specName or "", className or "", activeKeyLevel or 0))
+	f.specSelector.text:SetText(string.format("|c%s%s %s|r",
+		hex, specName or "", className or ""))
 end
 
 ShowSpecMenu = function(button)
