@@ -564,7 +564,7 @@ local function PopulateRow(row, fullName, rowIdx, section)
 		row.level:SetText(tostring(lvl))
 		local lr, lg, lb = ns.KeyLevelColor(lvl)
 		row.level:SetTextColor(lr, lg, lb)
-		local upgrade = ns.IsKeyUpgrade(entry.mapID, lvl)
+		local upgrade = section ~= "alts" and ns.IsKeyUpgrade(entry.mapID, lvl)
 		row.upgrade.mapID = entry.mapID
 		row.upgrade.candidateLevel = lvl
 		if upgrade then row.upgrade:Show() else row.upgrade:Hide() end
