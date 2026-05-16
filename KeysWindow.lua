@@ -59,8 +59,9 @@ local function CopyRaiderIO(fullName)
 	local url = ns.RaiderIOUrl(fullName)
 	if not url then return end
 	-- CopyToClipboard is a protected function — addons can't call it.
-	-- Open a popup with the URL pre-selected so the user can Ctrl+C it.
-	StaticPopup_Show("SEANKEYS_COPY_URL", nil, nil, url)
+	-- Open our custom popup with the URL pre-selected (Ctrl+C to copy).
+	-- See Core.lua ShowCopyUrlPopup for why we don't use StaticPopupDialogs.
+	ns.ShowCopyUrlPopup(url)
 end
 
 local function GetMDT()

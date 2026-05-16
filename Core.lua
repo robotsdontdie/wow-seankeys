@@ -46,6 +46,14 @@ local registeredWindows = {}
 
 local function GetContainer()
 	if container then return container end
+	-- We tried creating this anonymously and then writing
+	-- _G["SeanKeysContainer"] = container inside securecallfunction, hoping
+	-- to launder the global's taint identity. It didn't work: Blizzard's
+	-- runtime tags the frame itself (the value), not just the _G binding,
+	-- so reads of the global still trip the panel-manager taint check.
+	-- The only path past one-tainted-read-per-CloseWindows-walk is to drop
+	-- the UISpecialFrames entry entirely and lose ESC-to-close — which we
+	-- chose not to do. Staying simple instead.
 	container = CreateFrame("Frame", "SeanKeysContainer", UIParent)
 	container:SetAllPoints(UIParent)
 	container:Show()
@@ -268,33 +276,69 @@ local function RaiderIOUrl(fullName)
 	return string.format("https://raider.io/characters/%s/%s/%s", region, RealmSlug(realm), name)
 end
 
--- Register the popup definition in securecallfunction so the table write
--- (StaticPopupDialogs[key] = table) doesn't tag our entry with SeanKeys
--- identity. Without this, when Blizzard's StaticPopup system later
--- iterates StaticPopupDialogs (e.g., to find a visible popup when the
--- user clicks OK on the Item Upgrade confirm), the read of our entry
--- pulls SeanKeys taint into the chain — and any subsequent protected
--- call (UpgradeItem, etc.) is blamed on us.
-securecallfunction(function()
-	StaticPopupDialogs = StaticPopupDialogs or {}
-	StaticPopupDialogs["SEANKEYS_COPY_URL"] = {
-		text = "Raider.IO URL (Ctrl+C to copy):",
-		button1 = OKAY,
-		hasEditBox = true,
-		editBoxWidth = 350,
-		OnShow = function(self, data)
-			local eb = self.EditBox or self.editBox
-			if eb then
-				eb:SetText(data or "")
-				eb:HighlightText()
-				eb:SetFocus()
-			end
-		end,
-		EditBoxOnEnterPressed = function(self) self:GetParent():Hide() end,
-		EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
-		timeout = 0, whileDead = true, hideOnEscape = true,
-	}
-end)
+-- Custom popup frame for the "copy this URL" flow. We used to register a
+-- StaticPopupDialogs["SEANKEYS_COPY_URL"] entry and call StaticPopup_Show,
+-- but writing to the StaticPopupDialogs global tags the table with our
+-- taint identity — and Blizzard's StaticPopup system reads that table on
+-- every popup show/hide/click, including unrelated ones like the Item
+-- Upgrade confirm. The taint flow ended in "An action was blocked
+-- because of taint from SeanKeys - UpgradeItem()" every time the user
+-- upgraded an item. Wrapping the write in securecallfunction did not
+-- launder the table-tagging — same lesson as the container frame.
+--
+-- The fix is to avoid the shared global entirely: a bespoke popup
+-- parented to our container, with no global name and no entry in any
+-- Blizzard-walked table. The popup is built lazily on first ShowCopyUrlPopup
+-- call (clean click chain) and reused thereafter.
+local copyUrlPopup
+
+local function ShowCopyUrlPopup(url)
+	if not copyUrlPopup then
+		local p = CreateFrame("Frame", nil, GetContainer(), "BackdropTemplate")
+		p:SetSize(400, 110)
+		p:SetPoint("CENTER")
+		p:SetFrameStrata("DIALOG")
+		p:SetBackdrop({
+			bgFile = "Interface/DialogFrame/UI-DialogBox-Background",
+			edgeFile = "Interface/DialogFrame/UI-DialogBox-Border",
+			tile = true, tileSize = 32, edgeSize = 32,
+			insets = { left = 11, right = 12, top = 12, bottom = 11 },
+		})
+		p:EnableMouse(true)
+		p:SetMovable(true)
+		p:RegisterForDrag("LeftButton")
+		p:SetScript("OnDragStart", p.StartMoving)
+		p:SetScript("OnDragStop", p.StopMovingOrSizing)
+
+		local label = p:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		label:SetPoint("TOP", 0, -18)
+		label:SetText("Raider.IO URL (Ctrl+C to copy):")
+
+		local eb = CreateFrame("EditBox", nil, p, "InputBoxTemplate")
+		eb:SetSize(340, 22)
+		eb:SetPoint("TOP", label, "BOTTOM", 0, -10)
+		eb:SetAutoFocus(true)
+		eb:SetFontObject(ChatFontNormal)
+		eb:SetScript("OnEscapePressed", function() p:Hide() end)
+		eb:SetScript("OnEnterPressed", function() p:Hide() end)
+		p.editBox = eb
+
+		local ok = CreateFrame("Button", nil, p, "UIPanelButtonTemplate")
+		ok:SetSize(80, 22)
+		ok:SetPoint("BOTTOM", 0, 14)
+		ok:SetText(OKAY or "OK")
+		ok:SetScript("OnClick", function() p:Hide() end)
+
+		p:Hide()
+		copyUrlPopup = p
+	end
+	copyUrlPopup.editBox:SetText(url or "")
+	copyUrlPopup.editBox:HighlightText()
+	copyUrlPopup.editBox:SetFocus()
+	copyUrlPopup:Show()
+end
+
+ns.ShowCopyUrlPopup = ShowCopyUrlPopup
 
 ns.RaiderIOUrl = RaiderIOUrl
 

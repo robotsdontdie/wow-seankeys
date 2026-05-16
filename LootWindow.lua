@@ -145,14 +145,19 @@ local function TryJournalForUiMap(uiMapID)
 end
 
 -- Last-resort: iterate all dungeon-tier journal instances and match by name.
--- Iterates a few tiers (current + recent) since older dungeons sit in earlier
--- expansion tiers.
+-- Collect ALL matches across all tiers, then prefer the highest instanceID
+-- (which empirically corresponds to the most recently registered EJ entry).
+-- Older expansions sometimes have a legacy entry with the same dungeon name
+-- whose loot table contains pre-spec-filter items (e.g., Pit of Saron in
+-- Midnight resolved to WotLK's instanceID 278, whose 49xxx-range items
+-- have no spec metadata and bypass EJ_SetLootFilter entirely). Picking the
+-- highest ID gives us the modern, spec-filterable entry when one exists.
 local function FindJournalByName(dungeonName)
 	if not dungeonName or dungeonName == "" or not EJ_SelectTier or not EJ_GetInstanceByIndex then return nil end
-	local currentTier = EJ_GetCurrentTier and EJ_GetCurrentTier() or nil
-	local prevTier = currentTier
+	local prevTier = EJ_GetCurrentTier and EJ_GetCurrentTier() or nil
 	local numTiers = EJ_GetNumTiers and EJ_GetNumTiers() or 0
 	Dbg("  searching journal by name across", numTiers, "tiers for:", dungeonName)
+	local matches = {}
 	for tier = numTiers, 1, -1 do
 		EJ_SelectTier(tier)
 		local i = 1
@@ -160,15 +165,22 @@ local function FindJournalByName(dungeonName)
 			local instanceID, name = EJ_GetInstanceByIndex(i, false)  -- false = dungeon
 			if not instanceID then break end
 			if name == dungeonName then
-				Dbg("    matched tier=", tier, "instanceID=", instanceID, "name=", name)
-				if prevTier then EJ_SelectTier(prevTier) end
-				return instanceID
+				Dbg("    match tier=", tier, "instanceID=", instanceID, "name=", name)
+				matches[#matches + 1] = { tier = tier, instanceID = instanceID }
 			end
 			i = i + 1
 		end
 	end
 	if prevTier then EJ_SelectTier(prevTier) end
-	return nil
+	if #matches == 0 then return nil end
+	-- Prefer the highest instanceID — that's the most recent EJ registration
+	-- and the one most likely to have current spec-aware loot metadata.
+	local best = matches[1]
+	for _, m in ipairs(matches) do
+		if m.instanceID > best.instanceID then best = m end
+	end
+	Dbg("    chose tier=", best.tier, "instanceID=", best.instanceID, "(highest of", #matches, ")")
+	return best.instanceID
 end
 
 local function GetJournalInstance(challengeMapID)
@@ -230,7 +242,28 @@ local function GatherLoot(journalInstanceID, classID, specID)
 	end
 	local prevClass, prevSpec = EJ_GetLootFilter()
 	Dbg("  prev filter:", prevClass, prevSpec)
+	-- Two quirks compound here, and the fix needs both:
+	--
+	-- 1. EJ_SetLootFilter is a no-op when the new value matches the
+	--    current value. EJ initializes its filter to the player's
+	--    class/spec at addon load, so without a forced change the first
+	--    ShowLootFor for the player's own spec doesn't engage the
+	--    filter machinery. Cycling through (0,0) guarantees a real
+	--    change.
+	--
+	-- 2. EJ_SelectInstance(newID) for an instance EJ hasn't loaded yet
+	--    appears to do an async data load that ignores the current
+	--    filter — EJ_GetNumLoot returns the full unfiltered count. A
+	--    second SelectInstance for the same ID then returns filtered
+	--    data. The exception is the player's currently-owned keystone
+	--    dungeon, which EJ pre-caches at init, so a single SelectInstance
+	--    works for that one.
+	--
+	-- Two SelectInstance calls covers both the pre-cached and the
+	-- fresh-load case uniformly.
+	EJ_SetLootFilter(0, 0)
 	EJ_SetLootFilter(classID or 0, specID or 0)
+	EJ_SelectInstance(journalInstanceID)
 	EJ_SelectInstance(journalInstanceID)
 	local count = EJ_GetNumLoot() or 0
 	Dbg("  EJ_GetNumLoot =", count)
