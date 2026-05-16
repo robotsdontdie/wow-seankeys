@@ -67,8 +67,8 @@ local AFFIX_OVERRIDE = {
 --   * Xal'atath's Guile     (constant seasonal meta affix)
 --   * Lindormi's Guidance   (+12 keystone-hero affix)
 --   * any future affixes that don't follow the "<...>: <flavor>" pattern
--- Both Render and ComputeAffixSample skip nil results, so the filter applies
--- to display *and* to slot-width sizing.
+-- ComputeAffixDisplayString skips nil results, so the filter applies to the
+-- panel's affix-line display directly.
 local function ShortAffixName(affixID)
 	if not affixID or affixID == 0 then return nil end
 	if AFFIX_OVERRIDE[affixID] then return AFFIX_OVERRIDE[affixID] end
@@ -196,6 +196,70 @@ local function GetActiveRun()
 end
 
 -- ----------------------------------------------------------------------------
+-- Combat tracking
+--
+-- Snapshot forces + bosses-done at PLAYER_REGEN_DISABLED, compare on
+-- PLAYER_REGEN_ENABLED to compute the per-combat delta. Cleared on
+-- CHALLENGE_MODE_START / RESET. Combats with no forces gained and no boss
+-- killed are skipped (lone-mob taps from passing trash, etc).
+-- ----------------------------------------------------------------------------
+
+local combats = {}
+local inCombat = false
+local combatStart = nil  -- { elapsed, forces, bosses }
+
+-- Pre-canned sample combats for /sk hudtest so the expanded panel previews
+-- realistically without us having to actually run a key.
+local TEST_COMBATS = {
+	{ startElapsed = 18,  duration = 14, forcesKilled = 6,  boss = false },
+	{ startElapsed = 44,  duration = 22, forcesKilled = 14, boss = false },
+	{ startElapsed = 78,  duration = 8,  forcesKilled = 5,  boss = false },
+	{ startElapsed = 110, duration = 38, forcesKilled = 12, boss = true  },
+	{ startElapsed = 165, duration = 18, forcesKilled = 8,  boss = false },
+	{ startElapsed = 200, duration = 26, forcesKilled = 11, boss = false },
+}
+
+local function GetCombats()
+	if testMode then return TEST_COMBATS end
+	return combats
+end
+
+local function RecordCombatStart()
+	if not GetActiveRun() then return end
+	local crit = ReadCriteria()
+	combatStart = {
+		elapsed = GetElapsedSeconds(),
+		forces  = (crit and crit.forcesQuantity) or 0,
+		bosses  = (crit and crit.bossesDone) or 0,
+	}
+	inCombat = true
+end
+
+local function RecordCombatEnd()
+	if not inCombat or not combatStart then return end
+	inCombat = false
+	local crit = ReadCriteria()
+	local endForces = (crit and crit.forcesQuantity) or 0
+	local endBosses = (crit and crit.bossesDone) or 0
+	local entry = {
+		startElapsed = combatStart.elapsed,
+		duration     = GetElapsedSeconds() - combatStart.elapsed,
+		forcesKilled = math.max(0, endForces - combatStart.forces),
+		boss         = endBosses > combatStart.bosses,
+	}
+	combatStart = nil
+	if entry.forcesKilled > 0 or entry.boss then
+		table.insert(combats, entry)
+	end
+end
+
+local function ResetCombats()
+	wipe(combats)
+	inCombat = false
+	combatStart = nil
+end
+
+-- ----------------------------------------------------------------------------
 -- Frame + section layout
 --
 -- The HUD is a horizontal chain of sections. Each section is an (icon, text)
@@ -214,7 +278,17 @@ local SECTION_GAP = 10        -- between sections
 local ICON_TEXT_GAP = 2       -- between an icon and its own label
 local ICON_SIZE = 14
 
-local SECTION_ORDER = { "dungeon", "affixes", "timer", "forces", "bosses" }
+-- Forward declarations so BuildFrame's click handler and Render can refer to
+-- functions defined further down. Use `name = function() end` (not
+-- `function name()`) when assigning so the local upvalue is bound, not a
+-- new global of the same name.
+local ToggleExpanded
+local RenderPanel
+
+-- HUD slot order, left-to-right. Affixes were dropped from the HUD and
+-- moved into the expanded details panel; the SECTION_DEFS.affixes entry is
+-- kept only for its color value, which the panel reuses for its affix line.
+local SECTION_ORDER = { "dungeon", "bosses", "forces", "timer" }
 
 -- Per-section visual config.
 --   * `icon` is a static texture path. Sections with no `icon` and no
@@ -232,7 +306,7 @@ local SECTION_DEFS = {
 		crop  = true,
 	},
 	affixes = {
-		-- no icon — the affix labels speak for themselves
+		-- Not in SECTION_ORDER; kept for color reused by the details panel.
 		color = { 1.00, 0.65, 0.40 }, -- coral
 	},
 	timer = {
@@ -252,72 +326,39 @@ local SECTION_DEFS = {
 	},
 }
 
--- Worst-case sample strings per section. BuildFrame renders each into the
--- corresponding FontString, measures the resulting pixel width, and locks
--- that as the section's slot width. This keeps the layout stable across
--- value changes (timer ticking, forces dropping) without us having to guess
--- pixel widths from the font's char metrics.
---
--- Pick samples that bound the realistic max for each slot — they don't have
--- to match real content character-for-character, just be at least as wide.
---
--- The affixes sample is derived dynamically from C_MythicPlus.GetCurrentAffixes
--- (see ComputeAffixSample below) so we size to *this season's actual* affix
--- string rather than a hypothetical superset.
+-- Worst-case sample strings per HUD section. BuildFrame renders each into
+-- the corresponding FontString, measures the resulting pixel width, and
+-- locks that as the section's slot width. This keeps the layout stable
+-- across value changes (timer ticking, forces dropping).
 local SECTION_SAMPLES = {
-	dungeon = "Magisters +30",  -- longest curated short name + plausible top level
-	timer   = "59:59",          -- MM:SS (we clamp negatives to 0:00)
-	forces  = "100% 999/999",   -- full pull
-	bosses  = "9/9",            -- bosses-remaining/bosses-total
+	dungeon = "Magisters +30",   -- longest curated short name + plausible top level
+	timer   = "59:59",           -- MM:SS (we clamp negatives to 0:00)
+	forces  = "999/999 (100%)",  -- full pull, "<remaining>/<total> (<pct>)"
+	bosses  = "9/9",             -- bosses-remaining/bosses-total
 }
-
--- Used until C_MythicPlus.GetCurrentAffixes is populated (usually right after
--- login). "Ascendant" is the longest of the four Xal'atath sub-affixes, so
--- this sample never under-sizes the affix slot even if data is late.
-local AFFIX_SAMPLE_FALLBACK = "T/F/Ascendant"
 
 local SLOT_PADDING = 2  -- a couple px of safety added to each measurement
 
--- Build the affix-section sample from the live weekly affix list. Keys at
--- high enough levels carry both Tyrannical AND Fortified, so we prepend
--- both T and F and then append every non-T/F affix we get back from the API.
-local function ComputeAffixSample()
-	if not (C_MythicPlus and C_MythicPlus.GetCurrentAffixes) then
-		Dbg("MPlusHud.ComputeAffixSample: no C_MythicPlus.GetCurrentAffixes API; using fallback")
-		return AFFIX_SAMPLE_FALLBACK
+-- Joins a run's affixes into the slash-separated display string used by the
+-- details panel (e.g. "T/F/Devour"). Honors test-mode pre-formatted
+-- `affixLabels` if present; otherwise iterates `affixes` IDs through
+-- ShortAffixName (which filters out non-display affixes like Lindormi's
+-- Guidance and Xal'atath's Guile).
+local function ComputeAffixDisplayString(run)
+	if not run then return "-" end
+	if run.affixLabels then
+		return (#run.affixLabels > 0) and table.concat(run.affixLabels, "/") or "-"
 	end
-	local affixes = C_MythicPlus.GetCurrentAffixes()
-	Dbg(string.format("MPlusHud.ComputeAffixSample: GetCurrentAffixes returned %s entries",
-		affixes and tostring(#affixes) or "nil"))
-	if not affixes or #affixes == 0 then
-		Dbg("  -> empty/nil; using fallback " .. AFFIX_SAMPLE_FALLBACK)
-		return AFFIX_SAMPLE_FALLBACK
+	local labels = {}
+	for _, affixID in ipairs(run.affixes or {}) do
+		local s = ShortAffixName(affixID)
+		if s then labels[#labels + 1] = s end
 	end
-
-	local labels = { "T", "F" }
-	local sawNonTF = false
-	for i, info in ipairs(affixes) do
-		local id = info.id or info[1]
-		local label = ShortAffixName(id)
-		Dbg(string.format("  affix[%d]: id=%s label=%s", i, tostring(id), tostring(label)))
-		if label and label ~= "T" and label ~= "F" then
-			labels[#labels + 1] = label
-			sawNonTF = true
-		end
-	end
-	if not sawNonTF then
-		Dbg("  no non-T/F label found; using fallback " .. AFFIX_SAMPLE_FALLBACK)
-		return AFFIX_SAMPLE_FALLBACK
-	end
-	local sample = table.concat(labels, "/")
-	Dbg("  -> sample=" .. sample)
-	return sample
+	return (#labels > 0) and table.concat(labels, "/") or "-"
 end
 
 -- Set a section's text to `sample`, measure it, and lock that as the
--- section's slot width. Safe to call after BuildFrame at any time — used
--- both at build (initial measurement) and on MYTHIC_PLUS_CURRENT_AFFIX_UPDATE
--- (re-measure the affixes slot once real affix data arrives).
+-- section's slot width. Called once per section from BuildFrame.
 local function MeasureSection(key, sample)
 	local s = f and f.sections and f.sections[key]
 	if not s or not s.text then
@@ -350,12 +391,24 @@ local function BuildFrame()
 		insets = { left = 0, right = 0, top = 0, bottom = 0 },
 	})
 	f:SetBackdropColor(0, 0, 0, 0.55)
-	f:SetScript("OnDragStart", f.StartMoving)
+	-- Drag vs click: OnDragStart sets a flag we check in OnMouseUp so a
+	-- finished drag doesn't also fire as a click. Toggle is gated by
+	-- "left button + not dragged in this gesture".
+	f:SetScript("OnDragStart", function(self)
+		self._dragged = true
+		self:StartMoving()
+	end)
 	f:SetScript("OnDragStop", function(self)
 		self:StopMovingOrSizing()
 		local point, _, relPoint, x, y = self:GetPoint()
 		ns.db = ns.db or {}
 		ns.db.mpHudPos = { point = point, relPoint = relPoint, x = x, y = y }
+	end)
+	f:SetScript("OnMouseUp", function(self, button)
+		if button == "LeftButton" and not self._dragged and ToggleExpanded then
+			ToggleExpanded()
+		end
+		self._dragged = false
 	end)
 
 	-- Apply saved position (or default top-center) once the frame exists.
@@ -391,11 +444,8 @@ local function BuildFrame()
 	end
 
 	-- Measure each section's worst-case sample to lock in a slot width.
-	-- Done after all sections exist so the affixes one can re-measure later
-	-- (on MYTHIC_PLUS_CURRENT_AFFIX_UPDATE) via the same code path.
 	for _, key in ipairs(SECTION_ORDER) do
-		local sample = (key == "affixes") and ComputeAffixSample() or (SECTION_SAMPLES[key] or "")
-		MeasureSection(key, sample)
+		MeasureSection(key, SECTION_SAMPLES[key] or "")
 	end
 
 	f:Hide()
@@ -432,21 +482,6 @@ local function Render()
 	-- Dungeon
 	local dungeonStr = string.format("%s +%d", ShortDungeonName(run.mapID, run.name), run.level)
 
-	-- Affixes
-	local affixParts = {}
-	if run.affixLabels then
-		-- Pre-formatted labels (test mode) bypass GetAffixInfo entirely.
-		for _, label in ipairs(run.affixLabels) do
-			affixParts[#affixParts + 1] = label
-		end
-	else
-		for _, affixID in ipairs(run.affixes or {}) do
-			local s = ShortAffixName(affixID)
-			if s then affixParts[#affixParts + 1] = s end
-		end
-	end
-	local affixStr = #affixParts > 0 and table.concat(affixParts, "/") or "-"
-
 	-- Timer (countdown)
 	local elapsed = GetElapsedSeconds()
 	local remaining = (run.timeLimit or 0) - elapsed
@@ -462,7 +497,7 @@ local function Render()
 		if t > 0 then
 			local pctRemain = math.max(0, 1 - (q / t)) * 100
 			local countRemain = math.max(0, t - q)
-			forcesStr = string.format("%d%% %d/%d", math.floor(pctRemain + 0.5), countRemain, t)
+			forcesStr = string.format("%d/%d (%d%%)", countRemain, t, math.floor(pctRemain + 0.5))
 		end
 		local bossTotal = crit.bossesTotal or 0
 		if bossTotal > 0 then
@@ -474,7 +509,6 @@ local function Render()
 
 	-- Push values to the section fontstrings.
 	f.sections.dungeon.text:SetText(dungeonStr)
-	f.sections.affixes.text:SetText(affixStr)
 	f.sections.timer.text:SetText(timerStr)
 	f.sections.timer.text:SetTextColor(tr, tg, tb, 1)
 	f.sections.forces.text:SetText(forcesStr)
@@ -530,6 +564,271 @@ local function Render()
 	f:SetHeight(math.max(20, ICON_SIZE + PADDING_Y * 2))
 
 	if not f:IsShown() then f:Show() end
+
+	-- Cascade into the expanded panel if it's open. Cheap when collapsed
+	-- (RenderPanel early-returns).
+	if RenderPanel then RenderPanel() end
+end
+
+-- ----------------------------------------------------------------------------
+-- Expanded details panel
+--
+-- Click the HUD to toggle. Anchored under the HUD, parented to it (so it
+-- moves with drags and hides when the HUD hides). Two stacked sections:
+--   1. Three timers showing time remaining to upgrade the key by +1/+2/+3.
+--   2. Combat log: per-combat row with forces killed, duration, dungeon
+--      time remaining when combat started, and a skull marker for boss pulls.
+--
+-- Layout is a single top-down vertical pass that walks an accumulating y
+-- offset; the panel resizes to fit. Combat rows are pre-built up to
+-- MAX_COMBAT_ROWS and shown/hidden per render — newest combat at the top.
+-- ----------------------------------------------------------------------------
+
+local panel
+local PANEL_PAD_X       = 8
+local PANEL_PAD_Y       = 6
+local PANEL_LINE        = 14
+local PANEL_SECTION_GAP = 8
+local PANEL_HEADER_GAP  = 2
+local MAX_COMBAT_ROWS   = 30
+
+-- Cell-icon textures, reused from the main HUD's section defs so a tweak
+-- there propagates here too.
+local COMBAT_SKULL_TEX  = SECTION_DEFS.bosses.icon
+local COMBAT_FORCES_TEX = SECTION_DEFS.forces.icon
+local COMBAT_TIME_TEX   = SECTION_DEFS.timer.icon
+
+-- Fixed column anchors inside a combat row (px from row LEFT). The fixed
+-- positions keep all rows aligned regardless of which optional cells are
+-- shown (skull only appears for boss combats). The forces and time cells
+-- each split into two fontstrings — a right-aligned primary value and a
+-- left-aligned parenthesized secondary — so the "(" lines up vertically
+-- across rows. Widths are sized for: 3-digit force counts, "(NNN%)" pcts,
+-- "MM:SS" durations, and "(M:SS)" parenthesized durations.
+local C_NAME_X          = 4
+local C_NAME_W          = 64
+local C_SKULL_X         = 72
+local C_FORCES_ICON_X   = 88
+local C_FORCES_KILLED_W = 22  -- "999"
+local C_FORCES_PCT_W    = 40  -- "(100%)"
+local C_TIME_ICON_X     = 180
+local C_TIME_START_W    = 38  -- "MM:SS" (with slack)
+local C_TIME_DUR_W      = 50  -- "(MM:SS)" worst case
+local C_ICON_GAP        = 3   -- icon -> primary value
+local C_PAREN_GAP       = 3   -- primary value -> parenthesized value
+local CELL_ICON_SIZE    = 11
+
+local function BuildPanel()
+	if panel then return panel end
+	if not f then return nil end
+
+	panel = CreateFrame("Frame", "SeanKeysMPlusHudPanel", f, "BackdropTemplate")
+	panel:SetFrameStrata(f:GetFrameStrata())
+	panel:SetPoint("TOPLEFT",  f, "BOTTOMLEFT",  0, -2)
+	panel:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", 0, -2)
+	panel:SetBackdrop({
+		bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+		insets = { left = 0, right = 0, top = 0, bottom = 0 },
+	})
+	panel:SetBackdropColor(0, 0, 0, 0.55)
+
+	-- Combats section header (the run-info section is just two lines — no header).
+	panel.combatsHeader = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	panel.combatsHeader:SetText("|cffffd200COMBATS|r")
+
+	-- Run-info section: affix line + single timer row stacked.
+	panel.affixRow = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	panel.affixRow:SetJustifyH("LEFT")
+	local ac = SECTION_DEFS.affixes.color
+	panel.affixRow:SetTextColor(ac[1], ac[2], ac[3], 1)
+
+	panel.timerRow = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	panel.timerRow:SetJustifyH("LEFT")
+
+	-- Combat row pool. Each row has fixed cell columns so per-row data
+	-- changes don't shift cells around.
+	panel.combatRows = {}
+	for i = 1, MAX_COMBAT_ROWS do
+		local row = CreateFrame("Frame", nil, panel)
+		row:SetHeight(PANEL_LINE)
+
+		-- "Combat N" name label (greyed for visual de-emphasis vs. data).
+		row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		row.name:SetPoint("LEFT", C_NAME_X, 0)
+		row.name:SetWidth(C_NAME_W)
+		row.name:SetJustifyH("LEFT")
+		row.name:SetTextColor(0.78, 0.78, 0.78, 1)
+
+		-- Boss skull (shown only for boss combats).
+		row.skull = row:CreateTexture(nil, "OVERLAY")
+		row.skull:SetTexture(COMBAT_SKULL_TEX)
+		row.skull:SetSize(CELL_ICON_SIZE, CELL_ICON_SIZE)
+		row.skull:SetPoint("LEFT", C_SKULL_X, 0)
+		row.skull:Hide()
+
+		-- Forces cell: sword icon + "<killed>" (right-aligned, fixed) + "(<pct>%)" (left-aligned, fixed)
+		row.forcesIcon = row:CreateTexture(nil, "OVERLAY")
+		row.forcesIcon:SetTexture(COMBAT_FORCES_TEX)
+		row.forcesIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+		row.forcesIcon:SetSize(CELL_ICON_SIZE, CELL_ICON_SIZE)
+		row.forcesIcon:SetPoint("LEFT", C_FORCES_ICON_X, 0)
+
+		local fc = SECTION_DEFS.forces.color
+		row.forcesKilledText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		row.forcesKilledText:SetPoint("LEFT", row.forcesIcon, "RIGHT", C_ICON_GAP, 0)
+		row.forcesKilledText:SetWidth(C_FORCES_KILLED_W)
+		row.forcesKilledText:SetJustifyH("RIGHT")
+		row.forcesKilledText:SetTextColor(fc[1], fc[2], fc[3], 1)
+
+		row.forcesPctText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		row.forcesPctText:SetPoint("LEFT", row.forcesKilledText, "RIGHT", C_PAREN_GAP, 0)
+		row.forcesPctText:SetWidth(C_FORCES_PCT_W)
+		row.forcesPctText:SetJustifyH("LEFT")
+		row.forcesPctText:SetTextColor(fc[1], fc[2], fc[3], 1)
+
+		-- Time cell: clock icon + "<startRem>" (right-aligned, fixed) + "(<dur>)" (left-aligned, fixed)
+		row.timeIcon = row:CreateTexture(nil, "OVERLAY")
+		row.timeIcon:SetTexture(COMBAT_TIME_TEX)
+		row.timeIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+		row.timeIcon:SetSize(CELL_ICON_SIZE, CELL_ICON_SIZE)
+		row.timeIcon:SetPoint("LEFT", C_TIME_ICON_X, 0)
+
+		row.timeStartText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		row.timeStartText:SetPoint("LEFT", row.timeIcon, "RIGHT", C_ICON_GAP, 0)
+		row.timeStartText:SetWidth(C_TIME_START_W)
+		row.timeStartText:SetJustifyH("RIGHT")
+		row.timeStartText:SetTextColor(1, 1, 1, 1)
+
+		row.timeDurText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		row.timeDurText:SetPoint("LEFT", row.timeStartText, "RIGHT", C_PAREN_GAP, 0)
+		row.timeDurText:SetWidth(C_TIME_DUR_W)
+		row.timeDurText:SetJustifyH("LEFT")
+		row.timeDurText:SetTextColor(1, 1, 1, 1)
+
+		row:Hide()
+		panel.combatRows[i] = row
+	end
+
+	panel:Hide()
+	return panel
+end
+
+-- Assigned (not declared) so the forward-decl `local RenderPanel` upvalue
+-- gets bound, letting Render reach it without ordering concerns.
+RenderPanel = function()
+	if not panel or not panel:IsShown() then return end
+	local run = GetActiveRun()
+	if not run then return end
+
+	local elapsed = GetElapsedSeconds()
+	local tl      = run.timeLimit or 0
+	local crit    = ReadCriteria()
+	local forcesTotal = (crit and crit.forcesTotal) or 0
+
+	local y = PANEL_PAD_Y
+
+	-- Section 1, line 1: affixes (e.g. "T/F/Devour"), coloured per the
+	-- defunct HUD affix-section color so visual identity carries over.
+	panel.affixRow:ClearAllPoints()
+	panel.affixRow:SetPoint("TOPLEFT", PANEL_PAD_X, -y)
+	panel.affixRow:SetText(ComputeAffixDisplayString(run))
+	y = y + PANEL_LINE
+
+	-- Section 1, line 2: single-line timer row "+3 17:30   +2 23:30   +1 29:30"
+	-- Hardest first (best upgrade you can still get on the left).
+	local TIERS = {
+		{ label = "+3", target = tl * 0.6 },
+		{ label = "+2", target = tl * 0.8 },
+		{ label = "+1", target = tl       },
+	}
+	local parts = {}
+	for _, tier in ipairs(TIERS) do
+		local rem = tier.target - elapsed
+		local missed = rem <= 0
+		if rem < 0 then rem = 0 end
+		local timeColor = missed and "|cff888888" or "|cffffffff"
+		parts[#parts + 1] = string.format("|cffffd060%s|r %s%s|r",
+			tier.label, timeColor, FormatMMSS(rem))
+	end
+	panel.timerRow:ClearAllPoints()
+	panel.timerRow:SetPoint("TOPLEFT", PANEL_PAD_X, -y)
+	panel.timerRow:SetText(table.concat(parts, "     "))
+	y = y + PANEL_LINE + PANEL_SECTION_GAP
+
+	-- Section 2: combats header + rows
+	panel.combatsHeader:ClearAllPoints()
+	panel.combatsHeader:SetPoint("TOPLEFT", PANEL_PAD_X, -y)
+	y = y + PANEL_LINE + PANEL_HEADER_GAP
+
+	-- Combat rows, newest first. Iterate in reverse so latest pull is at top.
+	-- The chronological combat number (`i` in the source array) is what we
+	-- display as the row label, so the top row is "Combat N" (most recent).
+	local cs = GetCombats()
+	local shown = 0
+	for i = #cs, 1, -1 do
+		shown = shown + 1
+		if shown > MAX_COMBAT_ROWS then break end
+		local c = cs[i]
+		local row = panel.combatRows[shown]
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT",  panel, "TOPLEFT",  PANEL_PAD_X, -y)
+		row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -PANEL_PAD_X, -y)
+
+		row.name:SetText("Combat " .. i)
+
+		if c.boss then row.skull:Show() else row.skull:Hide() end
+
+		-- Forces: split into killed (right-aligned, fixed) + pct (left-aligned, fixed)
+		-- so the "(" lines up across rows. pct = killed / forcesTotal.
+		local killed = c.forcesKilled or 0
+		row.forcesKilledText:SetText(tostring(killed))
+		if forcesTotal > 0 then
+			local pct = math.floor((killed / forcesTotal) * 100 + 0.5)
+			row.forcesPctText:SetText(string.format("(%d%%)", pct))
+		else
+			row.forcesPctText:SetText("")
+		end
+
+		-- Time: split into start-remaining (right-aligned, fixed) + duration
+		-- (left-aligned in parens) so the "(" lines up across rows.
+		local timeRemAtStart = math.max(0, tl - (c.startElapsed or 0))
+		row.timeStartText:SetText(FormatMMSS(timeRemAtStart))
+		row.timeDurText:SetText(string.format("(%s)", FormatMMSS(c.duration or 0)))
+
+		row:Show()
+		y = y + PANEL_LINE
+	end
+	-- Hide unused row slots
+	for i = shown + 1, MAX_COMBAT_ROWS do
+		panel.combatRows[i]:Hide()
+	end
+
+	-- Empty-state hint when there are no combats yet.
+	if shown == 0 then
+		if not panel.emptyHint then
+			panel.emptyHint = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		end
+		panel.emptyHint:ClearAllPoints()
+		panel.emptyHint:SetPoint("TOPLEFT", PANEL_PAD_X + 8, -y)
+		panel.emptyHint:SetText("(no combats yet)")
+		panel.emptyHint:Show()
+		y = y + PANEL_LINE
+	elseif panel.emptyHint then
+		panel.emptyHint:Hide()
+	end
+
+	panel:SetHeight(y + PANEL_PAD_Y)
+end
+
+ToggleExpanded = function()
+	BuildPanel()
+	if not panel then return end
+	if panel:IsShown() then
+		panel:Hide()
+	else
+		panel:Show()
+		RenderPanel()
+	end
 end
 
 -- ----------------------------------------------------------------------------
@@ -578,16 +877,19 @@ boot:RegisterEvent("WORLD_STATE_TIMER_STOP")
 boot:RegisterEvent("SCENARIO_UPDATE")
 boot:RegisterEvent("SCENARIO_CRITERIA_UPDATE")
 boot:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-boot:RegisterEvent("MYTHIC_PLUS_CURRENT_AFFIX_UPDATE")
+boot:RegisterEvent("PLAYER_REGEN_DISABLED")
+boot:RegisterEvent("PLAYER_REGEN_ENABLED")
 boot:SetScript("OnEvent", function(_, event, arg1)
 	if event == "WORLD_STATE_TIMER_START" then
 		activeTimerID = arg1
 	elseif event == "WORLD_STATE_TIMER_STOP" then
 		if activeTimerID == arg1 then activeTimerID = nil end
-	elseif event == "MYTHIC_PLUS_CURRENT_AFFIX_UPDATE" then
-		-- Re-size the affix slot now that real affix data is available.
-		Dbg("MPlusHud: MYTHIC_PLUS_CURRENT_AFFIX_UPDATE -> remeasuring affix slot")
-		MeasureSection("affixes", ComputeAffixSample())
+	elseif event == "PLAYER_REGEN_DISABLED" then
+		RecordCombatStart()
+	elseif event == "PLAYER_REGEN_ENABLED" then
+		RecordCombatEnd()
+	elseif event == "CHALLENGE_MODE_START" or event == "CHALLENGE_MODE_RESET" then
+		ResetCombats()
 	end
 	Refresh()
 end)
