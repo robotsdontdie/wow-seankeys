@@ -122,6 +122,16 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 	elseif event == "PLAYER_LOGIN" then
 		ns.PullSelf()
 		ns.BindLibOpenRaid()
+		-- Pre-load Blizzard_EncounterJournal once at login so its panel-manager
+		-- registration happens here (clean context) rather than later from a
+		-- click chain. securecallfunction strips our identity from the load so
+		-- EJ doesn't get filed under "SeanKeys" with the panel manager.
+		-- Without this, opening the loot window can leave SeanKeys-tainted
+		-- state that gets blamed for later protected calls (e.g. clicking an
+		-- item in your bag triggering ADDON_ACTION_FORBIDDEN on UseContainerItem).
+		if not C_AddOns.IsAddOnLoaded("Blizzard_EncounterJournal") then
+			securecallfunction(C_AddOns.LoadAddOn, "Blizzard_EncounterJournal")
+		end
 		if IsInGuild() then
 			if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
 			elseif GuildRoster then GuildRoster() end

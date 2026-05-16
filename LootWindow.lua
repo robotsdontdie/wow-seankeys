@@ -122,10 +122,17 @@ local CHALLENGE_TO_INSTANCEMAP = {
 	[392] = 2441,  -- Tazavesh: So'leah's Gambit
 }
 
+-- Loading Blizzard_EncounterJournal causes EJ to register with UIParent's
+-- panel manager. If we load it from inside a click handler (or any tainted
+-- chain), our addon's execution context rides into the panel manager and
+-- gets blamed for unrelated protected calls later (e.g. UseContainerItem on
+-- a bag click). Wrapping the call in `securecallfunction` strips our
+-- identity for the load, so EJ registers as Blizzard rather than SeanKeys.
+-- See SeanKeys.lua's PLAYER_LOGIN handler for a one-shot pre-load too.
 local function EnsureEJLoaded()
 	if C_AddOns.IsAddOnLoaded("Blizzard_EncounterJournal") then return true end
-	Dbg("  loading Blizzard_EncounterJournal addon")
-	local ok, reason = C_AddOns.LoadAddOn("Blizzard_EncounterJournal")
+	Dbg("  loading Blizzard_EncounterJournal addon (securecall)")
+	local ok, reason = securecallfunction(C_AddOns.LoadAddOn, "Blizzard_EncounterJournal")
 	Dbg("  load result:", ok, "reason:", reason)
 	return ok
 end
@@ -214,8 +221,9 @@ local function GatherLoot(journalInstanceID, classID, specID)
 		return {}
 	end
 	if not C_AddOns.IsAddOnLoaded("Blizzard_EncounterJournal") then
-		Dbg("  loading Blizzard_EncounterJournal addon")
-		local loaded, reason = C_AddOns.LoadAddOn("Blizzard_EncounterJournal")
+		Dbg("  loading Blizzard_EncounterJournal addon (securecall)")
+		-- See EnsureEJLoaded above for why securecallfunction is required.
+		local loaded, reason = securecallfunction(C_AddOns.LoadAddOn, "Blizzard_EncounterJournal")
 		Dbg("  load result:", loaded, "reason:", reason)
 	else
 		Dbg("  Blizzard_EncounterJournal already loaded")
