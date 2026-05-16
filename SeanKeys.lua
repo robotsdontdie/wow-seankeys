@@ -103,6 +103,12 @@ end
 -- Events
 -- ----------------------------------------------------------------------------
 
+-- Debounce flags so spammy events (BAG_UPDATE_DELAYED on every loot/vendor
+-- click; GUILD_ROSTER_UPDATE on roster bursts) don't stack timers or do
+-- redundant Refresh work. A single deferred consumer drains each one.
+local pullSelfPending = false
+local guildRefreshPending = false
+
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("ADDON_LOADED")
 boot:RegisterEvent("PLAYER_LOGIN")
@@ -137,6 +143,17 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 		if not C_AddOns.IsAddOnLoaded("Blizzard_EncounterJournal") then
 			securecallfunction(C_AddOns.LoadAddOn, "Blizzard_EncounterJournal")
 		end
+		-- Pre-build all UI frames now, in a clean execution context, instead
+		-- of letting them be built lazily inside whatever click/event chain
+		-- triggers the first show. CreateFrame + SecureActionButtonTemplate
+		-- setup + tinsert(UISpecialFrames, ...) are exactly the kind of work
+		-- that left taint residue when run from the MythicPlusHud event
+		-- handlers. Wrapping in securecallfunction strips our identity from
+		-- the build so subsequent panel-manager / action-bar walks don't
+		-- file the resulting frames under "SeanKeys".
+		if ns.BuildKeysFrame  then securecallfunction(ns.BuildKeysFrame)  end
+		if ns.BuildLootFrame  then securecallfunction(ns.BuildLootFrame)  end
+		if ns.BuildDebugWindow then securecallfunction(ns.BuildDebugWindow) end
 		if IsInGuild() then
 			if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
 			elseif GuildRoster then GuildRoster() end
@@ -156,9 +173,24 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			end
 		end)
 	elseif event == "GUILD_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
+		-- Roster events arrive in bursts (login, members logging on/off, our
+		-- own GuildRoster() requests). Synchronous Refresh from the event
+		-- handler walks rows, manipulates secure teleport buttons, and
+		-- mutates `ns.mainFrame` layout — exactly the kind of work that
+		-- left taint residue when MythicPlusHud did similar from
+		-- PLAYER_REGEN_DISABLED. Defer + dedupe so the work runs on a
+		-- clean call chain and only once per burst.
 		ns.RebuildGuildSet()
 		ns.PersistAllTracked()
-		if ns.mainFrame and ns.mainFrame:IsShown() then ns.Refresh() end
+		if ns.mainFrame and ns.mainFrame:IsShown() and not guildRefreshPending then
+			guildRefreshPending = true
+			C_Timer.After(0, function()
+				guildRefreshPending = false
+				if not InCombatLockdown() and ns.mainFrame and ns.mainFrame:IsShown() then
+					ns.Refresh()
+				end
+			end)
+		end
 	elseif event == "GROUP_ROSTER_UPDATE" then
 		C_Timer.After(1, function()
 			if LKS and IsInGroup() then LKS.Request("PARTY") end
@@ -166,13 +198,30 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 				pcall(LSP.RequestGroupSpecialization)
 			end
 			ns.PullFromLibOpenRaid()
-			if ns.mainFrame and ns.mainFrame:IsShown() then ns.Refresh() end
+			if ns.mainFrame and ns.mainFrame:IsShown() and not InCombatLockdown() then
+				ns.Refresh()
+			end
 		end)
 	elseif event == "CHALLENGE_MODE_COMPLETED" or event == "BAG_UPDATE_DELAYED" then
-		C_Timer.After(2, ns.PullSelf)
+		-- BAG_UPDATE_DELAYED fires on every loot, quest reward, and vendor
+		-- click; without dedupe we stack one PullSelf timer per event,
+		-- and PullSelf itself fans out into UpsertKey -> RefreshIfVisible.
+		-- A single pending flag collapses bursts into one pull.
+		if not pullSelfPending then
+			pullSelfPending = true
+			C_Timer.After(2, function()
+				pullSelfPending = false
+				ns.PullSelf()
+			end)
+		end
 	elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
 		C_Timer.After(0.5, ns.PullSelf)
 	elseif event == "PLAYER_REGEN_ENABLED" then
-		ns.ProcessPending()
+		-- ProcessPending writes SetAttribute on SecureActionButtonTemplate
+		-- buttons. Wrap in securecallfunction so any taint we accumulate
+		-- iterating + writing attributes doesn't carry SeanKeys identity
+		-- into the post-combat action-bar refresh chain that immediately
+		-- follows PLAYER_REGEN_ENABLED.
+		securecallfunction(ns.ProcessPending)
 	end
 end)

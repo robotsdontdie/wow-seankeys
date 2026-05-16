@@ -114,7 +114,14 @@ local function TryOpenMDT(challengeMapID)
 	local mdt = GetMDT()
 	if not mdt or type(mdt.ShowInterface) ~= "function" then return false end
 	local match = MDT_DungeonIdxFor(mdt, challengeMapID)
-	mdt:ShowInterface()
+	-- Our OnClick already ran SeanKeys code (Dbg, lookup, etc.) before
+	-- we got here, so the call stack is tainted by us. MDT's ShowInterface
+	-- and UpdateToDungeon do non-trivial work — they create panels, set
+	-- attributes on AceGUI frames, register with their own panel manager.
+	-- Without securecallfunction, any protected operation MDT subsequently
+	-- performs gets blamed on SeanKeys instead of MDT. Wrapping here
+	-- isolates MDT's execution from our taint.
+	securecallfunction(function() mdt:ShowInterface() end)
 	if not match then
 		Dbg("MDT: no match for challengeMapID=", challengeMapID)
 		return true
@@ -124,7 +131,12 @@ local function TryOpenMDT(challengeMapID)
 	local function tryUpdate()
 		attempts = attempts + 1
 		if mdt.main_frame and mdt.main_frame:IsShown() then
-			local ok, err = pcall(function() mdt:UpdateToDungeon(match) end)
+			-- Same isolation as ShowInterface above; pcall stays so we
+			-- don't crash on MDT version drift, securecallfunction
+			-- keeps MDT's secure interactions out of SeanKeys' name.
+			local ok, err = pcall(function()
+				securecallfunction(function() mdt:UpdateToDungeon(match) end)
+			end)
 			if not ok then Dbg("MDT UpdateToDungeon error:", tostring(err)) end
 			return
 		end
@@ -758,3 +770,10 @@ local function Toggle()
 end
 
 ns.Toggle = Toggle
+
+-- Exposed so SeanKeys.lua can pre-build the frame at PLAYER_LOGIN inside
+-- securecallfunction. The 30 SecureActionButtonTemplate teleport buttons
+-- (and the UISpecialFrames mutation) are exactly the kind of work that
+-- belongs in a clean execution context, not in whatever click chain
+-- happens to trigger the first /sk toggle.
+ns.BuildKeysFrame = BuildFrame

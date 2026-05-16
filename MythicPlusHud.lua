@@ -374,6 +374,13 @@ local function MeasureSection(key, sample)
 		key, sample or "", strW, s.slotWidth))
 end
 
+-- Called via `securecallfunction(BuildFrame)` at PLAYER_LOGIN so the initial
+-- frame creation (and tinsert into UISpecialFrames) happens in a clean
+-- execution context. Without this, lazy first-build during an event handler
+-- (combat-edge events, ZONE_CHANGED_NEW_AREA on dungeon load, etc.) can
+-- leave SeanKeys-tainted state that Blizzard's ActionButton cooldown
+-- system later blames for a "Secret values are only allowed during
+-- untainted execution" error on every SPELL_UPDATE_COOLDOWN tick.
 local function BuildFrame()
 	if f then return f end
 
@@ -559,9 +566,15 @@ local function Render()
 	end
 
 	-- Frame width is also fixed (sum of slot widths + gaps + padding) so the
-	-- background doesn't breathe with the content either.
-	f:SetWidth(math.max(120, x - SECTION_GAP + PADDING_X))
-	f:SetHeight(math.max(20, ICON_SIZE + PADDING_Y * 2))
+	-- background doesn't breathe with the content either. Cache the applied
+	-- dimensions and only call SetWidth/SetHeight when they actually change —
+	-- the ticker fires every 0.5s, and resizing a UIParent-parented frame on
+	-- every tick is the kind of thing that has historically left taint
+	-- residue on Blizzard's per-frame layout state.
+	local newW = math.max(120, x - SECTION_GAP + PADDING_X)
+	local newH = math.max(20, ICON_SIZE + PADDING_Y * 2)
+	if f._appliedW ~= newW then f:SetWidth(newW); f._appliedW = newW end
+	if f._appliedH ~= newH then f:SetHeight(newH); f._appliedH = newH end
 
 	if not f:IsShown() then f:Show() end
 
@@ -854,40 +867,71 @@ end
 
 -- ----------------------------------------------------------------------------
 -- Public + events
+--
+-- We deliberately split events into two buckets:
+--   * "State" events (combat edges, world timer start/stop) only mutate our
+--     own Lua locals. They never touch frames or layout, and they never call
+--     Refresh.
+--   * "Run" events (challenge-mode lifecycle, zone changes) route through
+--     Refresh, which still only flips ticker state. The ticker itself does
+--     all rendering on a clean Lua call chain.
+--
+-- We intentionally do NOT register SCENARIO_UPDATE / SCENARIO_CRITERIA_UPDATE
+-- — they fire on every mob killed during combat, and the 0.5s ticker
+-- already covers that progress. Reacting to each one would be the same
+-- combat-time-event-chain trap PLAYER_REGEN_DISABLED used to be.
+--
+-- The split exists because combat-edge events (PLAYER_REGEN_DISABLED in
+-- particular) are processed by Blizzard's action-bar code on the same frame
+-- — running our layout work from that handler is the kind of thing that
+-- leaves SeanKeys taint on subsequent SPELL_UPDATE_COOLDOWN dispatches,
+-- which then errors out every time ActionButton:SetCooldown receives a
+-- secret value (the cooldown start time).
 -- ----------------------------------------------------------------------------
 
 local function Refresh()
-	BuildFrame()
+	if not f then return end  -- not built yet (pre-PLAYER_LOGIN)
 	if GetActiveRun() then
 		StartTicker()
 		Render()
 	else
 		StopTicker()
-		if f then f:Hide() end
+		if not InCombatLockdown() then f:Hide() end
 	end
 end
 
 local boot = CreateFrame("Frame")
+boot:RegisterEvent("PLAYER_LOGIN")
 boot:RegisterEvent("PLAYER_ENTERING_WORLD")
 boot:RegisterEvent("CHALLENGE_MODE_START")
 boot:RegisterEvent("CHALLENGE_MODE_RESET")
 boot:RegisterEvent("CHALLENGE_MODE_COMPLETED")
 boot:RegisterEvent("WORLD_STATE_TIMER_START")
 boot:RegisterEvent("WORLD_STATE_TIMER_STOP")
-boot:RegisterEvent("SCENARIO_UPDATE")
-boot:RegisterEvent("SCENARIO_CRITERIA_UPDATE")
 boot:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 boot:RegisterEvent("PLAYER_REGEN_DISABLED")
 boot:RegisterEvent("PLAYER_REGEN_ENABLED")
 boot:SetScript("OnEvent", function(_, event, arg1)
-	if event == "WORLD_STATE_TIMER_START" then
+	-- State-only events: never touch frames or call Refresh here. The
+	-- 0.5s ticker reads the same state and renders on a clean call chain.
+	if event == "PLAYER_LOGIN" then
+		-- Pre-build the frame once, inside securecallfunction, so the
+		-- CreateFrame + UISpecialFrames mutation happens on a clean call
+		-- chain. Same defensive pattern as the EJ pre-load in SeanKeys.lua.
+		securecallfunction(BuildFrame)
+		return
+	elseif event == "WORLD_STATE_TIMER_START" then
 		activeTimerID = arg1
+		return
 	elseif event == "WORLD_STATE_TIMER_STOP" then
 		if activeTimerID == arg1 then activeTimerID = nil end
+		return
 	elseif event == "PLAYER_REGEN_DISABLED" then
 		RecordCombatStart()
+		return
 	elseif event == "PLAYER_REGEN_ENABLED" then
 		RecordCombatEnd()
+		-- Fall through so the HUD can hide when a key ends outside combat.
 	elseif event == "CHALLENGE_MODE_START" or event == "CHALLENGE_MODE_RESET" then
 		ResetCombats()
 	end

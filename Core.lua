@@ -24,64 +24,75 @@ local function Dbg(...)
 end
 
 local debugFrame
+
+-- Build-only path; idempotent. Exposed so SeanKeys.lua can pre-build at
+-- PLAYER_LOGIN inside securecallfunction (clean execution context for the
+-- UISpecialFrames mutation + PortraitFrameTemplate chrome). Without this,
+-- the very first /sk debug or /sk levels click would do all that
+-- frame-creation work inside whatever click chain triggered it.
+local function BuildDebugWindow()
+	if debugFrame then return debugFrame end
+	local f = CreateFrame("Frame", "SeanKeysDebugFrame", UIParent, "PortraitFrameTemplate")
+	tinsert(UISpecialFrames, "SeanKeysDebugFrame")  -- ESC closes
+	f:SetSize(640, 440)
+	f:SetPoint("CENTER")
+	f:SetFrameStrata("MEDIUM")
+	-- Highest of the three SeanKeys windows so the debug log can sit above
+	-- both the keys and loot windows. PromoteFrameLevels also bumps the
+	-- template children so the portrait/close button don't get hidden
+	-- behind the keys window. See PromoteFrameLevels in this file for
+	-- why a plain SetFrameLevel on the parent is insufficient.
+	ns.PromoteFrameLevels(f, 2200)
+	f:SetMovable(true)
+	f:EnableMouse(true)
+	f:SetClampedToScreen(true)
+	f:RegisterForDrag("LeftButton")
+	f:SetScript("OnDragStart", f.StartMoving)
+	f:SetScript("OnDragStop", f.StopMovingOrSizing)
+	if f.SetTitle then f:SetTitle("SeanKeys Debug Log") elseif f.TitleText then f.TitleText:SetText("SeanKeys Debug Log") end
+	if f.SetPortraitToAsset then f:SetPortraitToAsset(133743) end -- generic scroll icon
+	if f.Inset and f.Inset.Bg then f.Inset.Bg:SetAlpha(0.7) end
+	f:Hide()
+
+	local sf = CreateFrame("ScrollFrame", "SeanKeysDebugScroll", f, "UIPanelScrollFrameTemplate")
+	sf:SetPoint("TOPLEFT", 14, -28)
+	sf:SetPoint("BOTTOMRIGHT", -36, 32)
+
+	local eb = CreateFrame("EditBox", nil, sf)
+	eb:SetMultiLine(true)
+	eb:SetAutoFocus(false)
+	eb:SetFontObject(ChatFontNormal)
+	eb:SetWidth(560)
+	eb:SetScript("OnEscapePressed", function() eb:ClearFocus() end)
+	sf:SetScrollChild(eb)
+	f.editBox = eb
+	f.scrollFrame = sf
+
+	local refresh = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	refresh:SetSize(80, 22)
+	refresh:SetPoint("BOTTOMRIGHT", -14, 6)
+	refresh:SetText("Refresh")
+	refresh:SetScript("OnClick", function() ns.ShowDebugWindow() end)
+
+	local clear = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	clear:SetSize(80, 22)
+	clear:SetPoint("RIGHT", refresh, "LEFT", -4, 0)
+	clear:SetText("Clear")
+	clear:SetScript("OnClick", function()
+		wipe(debugLog)
+		f.editBox:SetText("")
+	end)
+
+	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	f.hint:SetPoint("BOTTOMLEFT", 14, 12)
+	f.hint:SetText("Select text and press Ctrl+C to copy.")
+
+	debugFrame = f
+	return f
+end
+
 local function ShowDebugWindow()
-	if not debugFrame then
-		local f = CreateFrame("Frame", "SeanKeysDebugFrame", UIParent, "PortraitFrameTemplate")
-		tinsert(UISpecialFrames, "SeanKeysDebugFrame")  -- ESC closes
-		f:SetSize(640, 440)
-		f:SetPoint("CENTER")
-		f:SetFrameStrata("MEDIUM")
-		-- Highest of the three SeanKeys windows so the debug log can sit above
-		-- both the keys and loot windows. PromoteFrameLevels also bumps the
-		-- template children so the portrait/close button don't get hidden
-		-- behind the keys window. See PromoteFrameLevels in this file for
-		-- why a plain SetFrameLevel on the parent is insufficient.
-		ns.PromoteFrameLevels(f, 2200)
-		f:SetMovable(true)
-		f:EnableMouse(true)
-		f:SetClampedToScreen(true)
-		f:RegisterForDrag("LeftButton")
-		f:SetScript("OnDragStart", f.StartMoving)
-		f:SetScript("OnDragStop", f.StopMovingOrSizing)
-		if f.SetTitle then f:SetTitle("SeanKeys Debug Log") elseif f.TitleText then f.TitleText:SetText("SeanKeys Debug Log") end
-		if f.SetPortraitToAsset then f:SetPortraitToAsset(133743) end -- generic scroll icon
-		if f.Inset and f.Inset.Bg then f.Inset.Bg:SetAlpha(0.7) end
-
-		local sf = CreateFrame("ScrollFrame", "SeanKeysDebugScroll", f, "UIPanelScrollFrameTemplate")
-		sf:SetPoint("TOPLEFT", 14, -28)
-		sf:SetPoint("BOTTOMRIGHT", -36, 32)
-
-		local eb = CreateFrame("EditBox", nil, sf)
-		eb:SetMultiLine(true)
-		eb:SetAutoFocus(false)
-		eb:SetFontObject(ChatFontNormal)
-		eb:SetWidth(560)
-		eb:SetScript("OnEscapePressed", function() eb:ClearFocus() end)
-		sf:SetScrollChild(eb)
-		f.editBox = eb
-		f.scrollFrame = sf
-
-		local refresh = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-		refresh:SetSize(80, 22)
-		refresh:SetPoint("BOTTOMRIGHT", -14, 6)
-		refresh:SetText("Refresh")
-		refresh:SetScript("OnClick", function() ShowDebugWindow() end)
-
-		local clear = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-		clear:SetSize(80, 22)
-		clear:SetPoint("RIGHT", refresh, "LEFT", -4, 0)
-		clear:SetText("Clear")
-		clear:SetScript("OnClick", function()
-			wipe(debugLog)
-			f.editBox:SetText("")
-		end)
-
-		f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-		f.hint:SetPoint("BOTTOMLEFT", 14, 12)
-		f.hint:SetText("Select text and press Ctrl+C to copy.")
-
-		debugFrame = f
-	end
+	BuildDebugWindow()
 	debugFrame.editBox:SetText(table.concat(debugLog, "\n"))
 	debugFrame:Show()
 	C_Timer.After(0, function()
@@ -93,6 +104,7 @@ local function ShowDebugWindow()
 end
 
 ns.Dbg = Dbg
+ns.BuildDebugWindow = BuildDebugWindow
 ns.ShowDebugWindow = ShowDebugWindow
 
 -- ----------------------------------------------------------------------------

@@ -721,6 +721,12 @@ RenderLoot = function()
 	end
 end
 
+-- Exposed so SeanKeys.lua can pre-build the frame at PLAYER_LOGIN inside
+-- securecallfunction. The UISpecialFrames mutation and PortraitFrameTemplate
+-- chrome instantiation are the kind of work that belongs in a clean
+-- execution context — not in a dungeon-row click chain.
+ns.BuildLootFrame = BuildLootFrame
+
 function ns.ShowLootFor(challengeMapID, keyLevel)
 	Dbg("=== ShowLootFor invoked, challengeMapID=", challengeMapID, "keyLevel=", keyLevel, " ===")
 	local f = BuildLootFrame()

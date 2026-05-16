@@ -18,8 +18,25 @@ ns.guildMembers = guildMembers
 
 local function Dbg(...) if ns.Dbg then ns.Dbg(...) end end
 
+-- Library callbacks (LibKeystone, LibSpec, LibOpenRaid) and AstralKeys SV
+-- scans can fire in tight bursts — dozens of UpsertKey/UpsertSpec calls per
+-- tick during login storms or peer broadcast floods. Each Upsert used to
+-- call RefreshIfVisible synchronously, doing a full main-window layout
+-- (including SetAttribute on secure teleport buttons) per call inside the
+-- library's dispatch frame. Coalescing into one deferred Refresh keeps the
+-- secure-button writes off the lib's dispatch chain entirely.
+local refreshDirty = false
 local function RefreshIfVisible()
-	if ns.mainFrame and ns.mainFrame:IsShown() and ns.Refresh then ns.Refresh() end
+	if not (ns.mainFrame and ns.mainFrame:IsShown()) then return end
+	if refreshDirty then return end
+	refreshDirty = true
+	C_Timer.After(0, function()
+		refreshDirty = false
+		if ns.mainFrame and ns.mainFrame:IsShown() and ns.Refresh
+			and not InCombatLockdown() then
+			ns.Refresh()
+		end
+	end)
 end
 
 -- ----------------------------------------------------------------------------
@@ -168,18 +185,31 @@ if LSP then
 end
 
 local openRaidLib
+
+-- LibOpenRaid is third-party (Details / Plater bring it). Unlike LibKeystone
+-- and LibSpecialization (both bundled, both wrap callback dispatch in
+-- securecallfunction), LibOpenRaid's commHandler historically does NOT
+-- isolate callees. That means any taint our handler accumulates can flow
+-- back up the callstack into the lib's caller frame — e.g., Details'
+-- comms event chain — and get blamed on whatever protected call that
+-- frame eventually reaches. Wrap the body ourselves to strip our identity
+-- before returning.
+local function HandleOpenRaidKeystone(unitName, info)
+	if not info then return end
+	local mapID = info.challengeMapID or info.mapID or 0
+	local level = info.level or 0
+	local rating = info.rating or 0
+	local class = info.classID and select(2, GetClassInfo(info.classID)) or nil
+	UpsertKey(unitName, level, mapID, rating, "LibOpenRaid", class)
+end
+
 local function BindLibOpenRaid()
 	if openRaidLib then return end
 	openRaidLib = LibStub:GetLibrary("LibOpenRaid-1.0", true)
 	if not openRaidLib then return end
 
 	function addonObject.OnKeystoneUpdate(unitName, info)
-		if not info then return end
-		local mapID = info.challengeMapID or info.mapID or 0
-		local level = info.level or 0
-		local rating = info.rating or 0
-		local class = info.classID and select(2, GetClassInfo(info.classID)) or nil
-		UpsertKey(unitName, level, mapID, rating, "LibOpenRaid", class)
+		securecallfunction(HandleOpenRaidKeystone, unitName, info)
 	end
 
 	openRaidLib.RegisterCallback(addonObject, "KeystoneUpdate", "OnKeystoneUpdate")
