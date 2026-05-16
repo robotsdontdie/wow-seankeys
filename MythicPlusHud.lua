@@ -115,10 +115,35 @@ end
 -- classify and tally.
 -- ----------------------------------------------------------------------------
 
+-- Diagnostic: log the full criteria struct once per scenario step so we can
+-- verify the data types and values the API actually returns. Forces have
+-- been observed showing "off but plausible-looking" numbers — likely the
+-- API returning a percentage (0-100) where we expected raw mob counts, or
+-- an unexpected secondary weighted-progress criterion. Throttled to once
+-- per step (keyed by stepID + numCriteria) so the ticker doesn't spam.
+local loggedStepKey
+
 local function ReadCriteria()
 	if testMode then return TEST_CRIT end
 	local stepInfo = C_ScenarioInfo and C_ScenarioInfo.GetScenarioStepInfo and C_ScenarioInfo.GetScenarioStepInfo()
 	if not stepInfo or not stepInfo.numCriteria then return nil end
+
+	local stepKey = tostring(stepInfo.stepID or stepInfo.title or "?") .. "/" .. tostring(stepInfo.numCriteria)
+	if loggedStepKey ~= stepKey then
+		loggedStepKey = stepKey
+		Dbg(string.format("ReadCriteria: stepID=%s title=%q numCriteria=%d",
+			tostring(stepInfo.stepID), tostring(stepInfo.title), stepInfo.numCriteria))
+		for i = 1, stepInfo.numCriteria do
+			local c = C_ScenarioInfo.GetCriteriaInfo(i)
+			if c then
+				Dbg(string.format("  [%d] desc=%q wp=%s qty=%s(%s) total=%s(%s) qStr=%q completed=%s",
+					i, tostring(c.description), tostring(c.isWeightedProgress),
+					tostring(c.quantity), type(c.quantity),
+					tostring(c.totalQuantity), type(c.totalQuantity),
+					tostring(c.quantityString), tostring(c.completed)))
+			end
+		end
+	end
 
 	local forcesQuantity, forcesTotal
 	local bossesTotal, bossesDone = 0, 0
@@ -149,17 +174,47 @@ end
 --
 -- WORLD_STATE_TIMER_START fires with the active timer's ID; we cache it and
 -- poll GetWorldElapsedTime(timerID) each tick. If we missed the start event
--- (login/reload mid-key), scan a handful of slots looking for an active
--- ChallengeMode timer.
+-- (login/reload mid-key), enumerate active timers via GetWorldElapsedTimers
+-- and find the one whose type is ChallengeMode (1).
+--
+-- API signature note: GetWorldElapsedTime(timerID) returns
+--     (timerType, elapsed)
+-- — only two values. An earlier version of this file destructured three
+-- returns expecting (ok, elapsed, timerType), which made the comparison
+-- against LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE always nil-vs-1 and
+-- broke reload-mid-key recovery. The activeTimerID path's `ok == 1` check
+-- accidentally still worked because it was actually `timerType == 1`.
 -- ----------------------------------------------------------------------------
 
+local CHALLENGE_TIMER_TYPE = 1  -- LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE
 local activeTimerID
 
+-- Diagnostic throttle: we only log timer state every ~5s while we're in the
+-- "searching" branch (no usable activeTimerID), so the 0.5s ticker doesn't
+-- spam. Reset whenever WORLD_STATE_TIMER_START fires so a fresh search
+-- after a key restart gets fresh logs.
+local lastTimerLogTime = 0
+
 local function FindActiveTimer()
-	for i = 1, 10 do
-		local ok, elapsed, timerType = GetWorldElapsedTime(i)
-		if ok == 1 and timerType == LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE then
-			return i, elapsed
+	local shouldLog = (GetTime() - lastTimerLogTime) > 5
+	if shouldLog then lastTimerLogTime = GetTime() end
+
+	if not GetWorldElapsedTimers then
+		if shouldLog then Dbg("FindActiveTimer: GetWorldElapsedTimers API missing") end
+		return nil, 0
+	end
+	-- GetWorldElapsedTimers returns active timer IDs as varargs.
+	local ids = { GetWorldElapsedTimers() }
+	if shouldLog then
+		Dbg(string.format("FindActiveTimer: GetWorldElapsedTimers() returned %d ids", #ids))
+	end
+	for _, timerID in ipairs(ids) do
+		local timerType, elapsed = GetWorldElapsedTime(timerID)
+		if shouldLog then
+			Dbg(string.format("  id=%s type=%s elapsed=%s", tostring(timerID), tostring(timerType), tostring(elapsed)))
+		end
+		if timerType == CHALLENGE_TIMER_TYPE then
+			return timerID, elapsed
 		end
 	end
 	return nil, 0
@@ -168,8 +223,16 @@ end
 local function GetElapsedSeconds()
 	if testMode then return GetTime() - testStartTime end
 	if activeTimerID then
-		local ok, elapsed = GetWorldElapsedTime(activeTimerID)
-		if ok == 1 and elapsed and elapsed > 0 then return elapsed end
+		local timerType, elapsed = GetWorldElapsedTime(activeTimerID)
+		if timerType == CHALLENGE_TIMER_TYPE and elapsed and elapsed > 0 then
+			return elapsed
+		end
+		-- Cached ID exists but no longer returns a valid timer — log
+		-- once and fall through to re-discover via FindActiveTimer.
+		if (GetTime() - lastTimerLogTime) > 5 then
+			Dbg(string.format("GetElapsedSeconds: cached activeTimerID=%s now returns type=%s elapsed=%s",
+				tostring(activeTimerID), tostring(timerType), tostring(elapsed)))
+		end
 	end
 	local id, elapsed = FindActiveTimer()
 	if id then activeTimerID = id end
@@ -384,8 +447,12 @@ end
 local function BuildFrame()
 	if f then return f end
 
-	f = CreateFrame("Frame", "SeanKeysMPlusHud", UIParent, "BackdropTemplate")
-	tinsert(UISpecialFrames, "SeanKeysMPlusHud")
+	-- Anonymous + parented to the SeanKeys container. ESC routes through
+	-- the container's OnHide (see Core.lua GetContainer). Note this means
+	-- pressing ESC during a key briefly hides the HUD; the 0.5s ticker
+	-- re-shows it on the next tick because GetActiveRun() is still true.
+	f = CreateFrame("Frame", nil, ns.GetContainer(), "BackdropTemplate")
+	ns.RegisterWindow(f)
 	f:SetFrameStrata("MEDIUM")
 	f:SetSize(420, 28)
 	f:SetClampedToScreen(true)
@@ -496,14 +563,22 @@ local function Render()
 	local tr, tg, tb = TimerRGB(remaining, run.timeLimit)
 
 	-- Forces + bosses (remaining)
+	--
+	-- API quirk in Midnight: the Enemy Forces criterion mixes units —
+	-- `quantity` is the completion percentage (0..100) while
+	-- `totalQuantity` is the actual mob count required (e.g. 596). So
+	-- the "remaining count" is total * (1 - quantity/100), NOT total - quantity
+	-- as the naive math would suggest. The naive math made the display
+	-- decrease by exactly 100 over a full clear regardless of dungeon size.
+	-- See the ReadCriteria diagnostic log if this ever shifts again.
 	local crit = ReadCriteria()
 	local forcesStr = "?"
 	local bossesStr, hasBosses
 	if crit then
-		local q, t = crit.forcesQuantity or 0, crit.forcesTotal or 0
+		local qPct, t = crit.forcesQuantity or 0, crit.forcesTotal or 0
 		if t > 0 then
-			local pctRemain = math.max(0, 1 - (q / t)) * 100
-			local countRemain = math.max(0, t - q)
+			local pctRemain = math.max(0, 100 - qPct)
+			local countRemain = math.floor(t * pctRemain / 100 + 0.5)
 			forcesStr = string.format("%d/%d (%d%%)", countRemain, t, math.floor(pctRemain + 0.5))
 		end
 		local bossTotal = crit.bossesTotal or 0
@@ -635,7 +710,8 @@ local function BuildPanel()
 	if panel then return panel end
 	if not f then return nil end
 
-	panel = CreateFrame("Frame", "SeanKeysMPlusHudPanel", f, "BackdropTemplate")
+	-- Anonymous: no need for a global name on this private child.
+	panel = CreateFrame("Frame", nil, f, "BackdropTemplate")
 	panel:SetFrameStrata(f:GetFrameStrata())
 	panel:SetPoint("TOPLEFT",  f, "BOTTOMLEFT",  0, -2)
 	panel:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", 0, -2)
@@ -861,7 +937,13 @@ local function StartTicker()
 			if f then f:Hide() end
 			return
 		end
-		Render()
+		-- Strip our identity from the per-tick Render so the SetWidth /
+		-- SetHeight / Show / SetText / SetPoint mutations on the HUD frame
+		-- (a UIParent child) never carry SeanKeys taint into UIParent's
+		-- panel-manager state. The HUD is the most frequent UI mutation
+		-- site in the addon (every 0.5s during a key) — the most worthwhile
+		-- place to apply this isolation.
+		securecallfunction(Render)
 	end)
 end
 
@@ -893,7 +975,9 @@ local function Refresh()
 	if not f then return end  -- not built yet (pre-PLAYER_LOGIN)
 	if GetActiveRun() then
 		StartTicker()
-		Render()
+		-- Same isolation rationale as the ticker callback above — the
+		-- event-driven Refresh path also mutates the HUD frame.
+		securecallfunction(Render)
 	else
 		StopTicker()
 		if not InCombatLockdown() then f:Hide() end

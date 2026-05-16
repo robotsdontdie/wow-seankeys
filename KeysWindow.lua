@@ -181,7 +181,8 @@ local function CreateRow(parent, index)
 	row.specIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
 	-- Name button (click to copy Raider.IO URL). Not secure - simple OnClick.
-	local nameBtn = CreateFrame("Button", "SeanKeysNameBtn" .. index, row)
+	-- Anonymous: no external references to this button by global name.
+	local nameBtn = CreateFrame("Button", nil, row)
 	nameBtn:SetSize(140, ROW_HEIGHT)
 	nameBtn:SetPoint("LEFT", row, "LEFT", 52, 0)
 	nameBtn:RegisterForClicks("AnyUp")
@@ -208,7 +209,9 @@ local function CreateRow(parent, index)
 	row.wishStar:Hide()
 
 	-- Teleport button lives at the start of the Key column, just before the dungeon name.
-	local btn = CreateFrame("Button", "SeanKeysTeleBtn" .. index, row, "SecureActionButtonTemplate")
+	-- Anonymous: any walk that enumerates SecureActionButtonTemplate frames
+	-- by global name would otherwise pull SeanKeys taint via the read.
+	local btn = CreateFrame("Button", nil, row, "SecureActionButtonTemplate")
 	btn:SetSize(ROW_HEIGHT - 2, ROW_HEIGHT - 2)
 	btn:SetPoint("LEFT", row, "LEFT", 196, 0)
 	btn:RegisterForClicks("AnyUp", "AnyDown")
@@ -293,6 +296,9 @@ local function CreateRow(parent, index)
 		Dbg("dungeon row clicked, btn=", button, "challengeMapID=", self.challengeMapID, "keyLevel=", self.keyLevel)
 		if not self.challengeMapID or self.challengeMapID == 0 then return end
 		if button == "RightButton" then
+			-- TryOpenMDT internally wraps mdt:ShowInterface and
+			-- mdt:UpdateToDungeon in securecallfunction; no need to wrap
+			-- the call site as well.
 			TryOpenMDT(self.challengeMapID)
 		elseif ns.ShowLootFor then
 			ns.ShowLootFor(self.challengeMapID, self.keyLevel)
@@ -319,9 +325,11 @@ end
 local function BuildFrame()
 	if mainFrame then return mainFrame end
 
-	local f = CreateFrame("Frame", "SeanKeysFrame", UIParent, "PortraitFrameTemplate")
-	-- Hitting ESC walks UISpecialFrames and hides the first visible entry.
-	tinsert(UISpecialFrames, "SeanKeysFrame")
+	-- Anonymous + parented to the SeanKeys container. The container is the
+	-- only SeanKeys frame the panel manager sees in UISpecialFrames; its
+	-- OnHide fans ESC out to every registered window (see Core.lua).
+	local f = CreateFrame("Frame", nil, ns.GetContainer(), "PortraitFrameTemplate")
+	ns.RegisterWindow(f)
 	f:SetSize(FRAME_W, FRAME_H)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("MEDIUM")

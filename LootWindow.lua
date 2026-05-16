@@ -347,8 +347,10 @@ end
 
 local function BuildLootFrame()
 	if lootFrame then return lootFrame end
-	local f = CreateFrame("Frame", "SeanKeysLootFrame", UIParent, "PortraitFrameTemplate")
-	tinsert(UISpecialFrames, "SeanKeysLootFrame")  -- ESC closes
+	-- Anonymous + parented to the SeanKeys container. ESC routes through
+	-- the container's OnHide (see Core.lua GetContainer).
+	local f = CreateFrame("Frame", nil, ns.GetContainer(), "PortraitFrameTemplate")
+	ns.RegisterWindow(f)
 	-- height = chrome + gear rows + other-items section + footer
 	local otherSectionH = 24 + (OTHER_ICON_SIZE + 4) * OTHER_MAX_ROWS
 	f:SetSize(LOOT_FRAME_W, 80 + LOOT_ROW_H * LOOT_NUM_GEAR_ROWS + otherSectionH + 24)
@@ -536,6 +538,7 @@ local function BuildLootFrame()
 	f.hint:SetPoint("BOTTOM", 0, 10)
 
 	lootFrame = f
+	ns.lootFrame = f  -- exposed for /sk levels diagnostic
 	return f
 end
 

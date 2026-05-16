@@ -34,7 +34,10 @@ local function RefreshIfVisible()
 		refreshDirty = false
 		if ns.mainFrame and ns.mainFrame:IsShown() and ns.Refresh
 			and not InCombatLockdown() then
-			ns.Refresh()
+			-- Strip our identity from the Refresh so the secure-button
+			-- attribute writes and main-frame layout mutations don't carry
+			-- SeanKeys taint into UIParent's panel-manager state.
+			securecallfunction(ns.Refresh)
 		end
 	end)
 end

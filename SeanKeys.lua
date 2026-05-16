@@ -81,9 +81,11 @@ SlashCmdList.SEANKEYS = function(msg)
 		end
 	elseif msg == "levels" then
 		print("|cffffcc00SeanKeys:|r dumping frame levels to debug log...")
-		if ns.mainFrame then ns.DumpFrameLevels(ns.mainFrame) end
-		if _G.SeanKeysLootFrame then ns.DumpFrameLevels(_G.SeanKeysLootFrame) end
-		if _G.SeanKeysDebugFrame then ns.DumpFrameLevels(_G.SeanKeysDebugFrame) end
+		-- Windows are now anonymous children of SeanKeysContainer, so the
+		-- _G.SeanKeys* globals no longer exist. Use the ns-exposed refs.
+		if ns.mainFrame  then ns.DumpFrameLevels(ns.mainFrame)  end
+		if ns.lootFrame  then ns.DumpFrameLevels(ns.lootFrame)  end
+		if ns.debugFrame then ns.DumpFrameLevels(ns.debugFrame) end
 		ns.ShowDebugWindow()
 	elseif msg == "dump" then
 		for name, k in pairs(ns.keys) do
@@ -131,45 +133,61 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			if ns.Wishlist and ns.Wishlist.Init then ns.Wishlist.Init() end
 		end
 	elseif event == "PLAYER_LOGIN" then
-		ns.PullSelf()
-		ns.BindLibOpenRaid()
-		-- Pre-load Blizzard_EncounterJournal once at login so its panel-manager
-		-- registration happens here (clean context) rather than later from a
-		-- click chain. securecallfunction strips our identity from the load so
-		-- EJ doesn't get filed under "SeanKeys" with the panel manager.
-		-- Without this, opening the loot window can leave SeanKeys-tainted
-		-- state that gets blamed for later protected calls (e.g. clicking an
-		-- item in your bag triggering ADDON_ACTION_FORBIDDEN on UseContainerItem).
+		-- PLAYER_LOGIN runs a long synchronous chain. If ANY step taints
+		-- (touches a Blizzard data structure that later participates in a
+		-- panel-manager walk, action-bar event, etc.), the taint persists
+		-- for the entire session and gets blamed on us when, e.g., the user
+		-- opens the talents pane in an instance and TextStatusBar's
+		-- secret-value compare fails. Wrapping each call in
+		-- securecallfunction strips our identity per-step so per-step
+		-- residue can't accumulate session-wide.
+		--
+		-- Pre-load Blizzard_EncounterJournal once at login so its panel-
+		-- manager registration happens here (clean context) rather than
+		-- later from a click chain. Without this, opening the loot window
+		-- can leave SeanKeys-tainted state that gets blamed for later
+		-- protected calls (e.g. clicking an item in your bag triggering
+		-- ADDON_ACTION_FORBIDDEN on UseContainerItem).
+		--
+		-- Pre-building the windows here is the same defensive pattern —
+		-- CreateFrame + SecureActionButtonTemplate setup + tinsert into
+		-- UISpecialFrames is exactly the kind of work that left taint
+		-- residue when MythicPlusHud did it from event handlers.
+		securecallfunction(ns.PullSelf)
+		securecallfunction(ns.BindLibOpenRaid)
 		if not C_AddOns.IsAddOnLoaded("Blizzard_EncounterJournal") then
 			securecallfunction(C_AddOns.LoadAddOn, "Blizzard_EncounterJournal")
 		end
-		-- Pre-build all UI frames now, in a clean execution context, instead
-		-- of letting them be built lazily inside whatever click/event chain
-		-- triggers the first show. CreateFrame + SecureActionButtonTemplate
-		-- setup + tinsert(UISpecialFrames, ...) are exactly the kind of work
-		-- that left taint residue when run from the MythicPlusHud event
-		-- handlers. Wrapping in securecallfunction strips our identity from
-		-- the build so subsequent panel-manager / action-bar walks don't
-		-- file the resulting frames under "SeanKeys".
 		if ns.BuildKeysFrame  then securecallfunction(ns.BuildKeysFrame)  end
 		if ns.BuildLootFrame  then securecallfunction(ns.BuildLootFrame)  end
 		if ns.BuildDebugWindow then securecallfunction(ns.BuildDebugWindow) end
 		if IsInGuild() then
-			if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
-			elseif GuildRoster then GuildRoster() end
+			if C_GuildInfo and C_GuildInfo.GuildRoster then
+				securecallfunction(C_GuildInfo.GuildRoster)
+			elseif GuildRoster then
+				securecallfunction(GuildRoster)
+			end
 		end
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		C_Timer.After(2, function()
-			ns.PullSelf()
-			ns.PullFromAstralKeys()
-			ns.PullFromLibOpenRaid()
-			if LKS and IsInGroup() then LKS.Request("PARTY") end
+			-- Same per-call securecallfunction strategy as PLAYER_LOGIN.
+			-- PLAYER_ENTERING_WORLD fires on every zone load, including
+			-- dungeon entries — sensitive context for panel-manager taint.
+			securecallfunction(ns.PullSelf)
+			securecallfunction(ns.PullFromAstralKeys)
+			securecallfunction(ns.PullFromLibOpenRaid)
+			if LKS and IsInGroup() then
+				securecallfunction(LKS.Request, "PARTY")
+			end
 			if LSP and IsInGroup() and LSP.RequestGroupSpecialization then
-				pcall(LSP.RequestGroupSpecialization)
+				securecallfunction(LSP.RequestGroupSpecialization)
 			end
 			if IsInGuild() then
-				if C_GuildInfo and C_GuildInfo.GuildRoster then C_GuildInfo.GuildRoster()
-				elseif GuildRoster then GuildRoster() end
+				if C_GuildInfo and C_GuildInfo.GuildRoster then
+					securecallfunction(C_GuildInfo.GuildRoster)
+				elseif GuildRoster then
+					securecallfunction(GuildRoster)
+				end
 			end
 		end)
 	elseif event == "GUILD_ROSTER_UPDATE" or event == "PLAYER_GUILD_UPDATE" then
@@ -187,19 +205,21 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			C_Timer.After(0, function()
 				guildRefreshPending = false
 				if not InCombatLockdown() and ns.mainFrame and ns.mainFrame:IsShown() then
-					ns.Refresh()
+					securecallfunction(ns.Refresh)
 				end
 			end)
 		end
 	elseif event == "GROUP_ROSTER_UPDATE" then
 		C_Timer.After(1, function()
-			if LKS and IsInGroup() then LKS.Request("PARTY") end
-			if LSP and IsInGroup() and LSP.RequestGroupSpecialization then
-				pcall(LSP.RequestGroupSpecialization)
+			if LKS and IsInGroup() then
+				securecallfunction(LKS.Request, "PARTY")
 			end
-			ns.PullFromLibOpenRaid()
+			if LSP and IsInGroup() and LSP.RequestGroupSpecialization then
+				securecallfunction(LSP.RequestGroupSpecialization)
+			end
+			securecallfunction(ns.PullFromLibOpenRaid)
 			if ns.mainFrame and ns.mainFrame:IsShown() and not InCombatLockdown() then
-				ns.Refresh()
+				securecallfunction(ns.Refresh)
 			end
 		end)
 	elseif event == "CHALLENGE_MODE_COMPLETED" or event == "BAG_UPDATE_DELAYED" then
@@ -211,11 +231,11 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			pullSelfPending = true
 			C_Timer.After(2, function()
 				pullSelfPending = false
-				ns.PullSelf()
+				securecallfunction(ns.PullSelf)
 			end)
 		end
 	elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
-		C_Timer.After(0.5, ns.PullSelf)
+		C_Timer.After(0.5, function() securecallfunction(ns.PullSelf) end)
 	elseif event == "PLAYER_REGEN_ENABLED" then
 		-- ProcessPending writes SetAttribute on SecureActionButtonTemplate
 		-- buttons. Wrap in securecallfunction so any taint we accumulate

@@ -23,17 +23,67 @@ local function Dbg(...)
 	end
 end
 
+-- ----------------------------------------------------------------------------
+-- Container frame
+--
+-- A single named UIParent child that owns every SeanKeys top-level window.
+-- Without this, every individual window would need its own global name
+-- (CreateFrame's `name` parameter writes `_G[name]`) and an entry in
+-- UISpecialFrames. The panel manager's CloseAllWindows walks UISpecialFrames
+-- doing `_G[name]:Hide()` on each entry, and every read of one of our
+-- globals pulls SeanKeys taint into the execution chain — every /reload
+-- and every ESC press taints the panel manager.
+--
+-- One container reduces that to a single tainted global read per walk.
+-- The four windows become anonymous children of the container, with no
+-- globals and no UISpecialFrames entries of their own. The container's
+-- OnHide fans the close out to any visible registered window, then
+-- re-shows itself next tick so the next /sk command works normally.
+-- ----------------------------------------------------------------------------
+
+local container
+local registeredWindows = {}
+
+local function GetContainer()
+	if container then return container end
+	container = CreateFrame("Frame", "SeanKeysContainer", UIParent)
+	container:SetAllPoints(UIParent)
+	container:Show()
+	tinsert(UISpecialFrames, "SeanKeysContainer")
+	container:SetScript("OnHide", function(self)
+		for _, win in ipairs(registeredWindows) do
+			if win and win:IsShown() then win:Hide() end
+		end
+		-- Re-show the container next tick so subsequent /sk shows work
+		-- without needing to manually re-show the container first. The
+		-- registered windows stay individually hidden because we
+		-- explicitly Hide()'d them above.
+		C_Timer.After(0, function() self:Show() end)
+	end)
+	return container
+end
+
+local function RegisterWindow(frame)
+	table.insert(registeredWindows, frame)
+end
+
+ns.GetContainer = GetContainer
+ns.RegisterWindow = RegisterWindow
+
 local debugFrame
 
 -- Build-only path; idempotent. Exposed so SeanKeys.lua can pre-build at
 -- PLAYER_LOGIN inside securecallfunction (clean execution context for the
--- UISpecialFrames mutation + PortraitFrameTemplate chrome). Without this,
--- the very first /sk debug or /sk levels click would do all that
--- frame-creation work inside whatever click chain triggered it.
+-- PortraitFrameTemplate chrome). Without this, the very first /sk debug
+-- or /sk levels click would do all that frame-creation work inside
+-- whatever click chain triggered it.
 local function BuildDebugWindow()
 	if debugFrame then return debugFrame end
-	local f = CreateFrame("Frame", "SeanKeysDebugFrame", UIParent, "PortraitFrameTemplate")
-	tinsert(UISpecialFrames, "SeanKeysDebugFrame")  -- ESC closes
+	-- Anonymous + parented to the SeanKeys container so the panel manager
+	-- doesn't pick up a per-window global. ESC routes through the
+	-- container's OnHide (see GetContainer above).
+	local f = CreateFrame("Frame", nil, GetContainer(), "PortraitFrameTemplate")
+	RegisterWindow(f)
 	f:SetSize(640, 440)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("MEDIUM")
@@ -54,7 +104,8 @@ local function BuildDebugWindow()
 	if f.Inset and f.Inset.Bg then f.Inset.Bg:SetAlpha(0.7) end
 	f:Hide()
 
-	local sf = CreateFrame("ScrollFrame", "SeanKeysDebugScroll", f, "UIPanelScrollFrameTemplate")
+	-- Anonymous: no need for a global name on a private child frame.
+	local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
 	sf:SetPoint("TOPLEFT", 14, -28)
 	sf:SetPoint("BOTTOMRIGHT", -36, 32)
 
@@ -88,6 +139,7 @@ local function BuildDebugWindow()
 	f.hint:SetText("Select text and press Ctrl+C to copy.")
 
 	debugFrame = f
+	ns.debugFrame = f  -- exposed for /sk levels diagnostic
 	return f
 end
 
@@ -216,24 +268,33 @@ local function RaiderIOUrl(fullName)
 	return string.format("https://raider.io/characters/%s/%s/%s", region, RealmSlug(realm), name)
 end
 
-StaticPopupDialogs = StaticPopupDialogs or {}
-StaticPopupDialogs["SEANKEYS_COPY_URL"] = {
-	text = "Raider.IO URL (Ctrl+C to copy):",
-	button1 = OKAY,
-	hasEditBox = true,
-	editBoxWidth = 350,
-	OnShow = function(self, data)
-		local eb = self.EditBox or self.editBox
-		if eb then
-			eb:SetText(data or "")
-			eb:HighlightText()
-			eb:SetFocus()
-		end
-	end,
-	EditBoxOnEnterPressed = function(self) self:GetParent():Hide() end,
-	EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
-	timeout = 0, whileDead = true, hideOnEscape = true,
-}
+-- Register the popup definition in securecallfunction so the table write
+-- (StaticPopupDialogs[key] = table) doesn't tag our entry with SeanKeys
+-- identity. Without this, when Blizzard's StaticPopup system later
+-- iterates StaticPopupDialogs (e.g., to find a visible popup when the
+-- user clicks OK on the Item Upgrade confirm), the read of our entry
+-- pulls SeanKeys taint into the chain — and any subsequent protected
+-- call (UpgradeItem, etc.) is blamed on us.
+securecallfunction(function()
+	StaticPopupDialogs = StaticPopupDialogs or {}
+	StaticPopupDialogs["SEANKEYS_COPY_URL"] = {
+		text = "Raider.IO URL (Ctrl+C to copy):",
+		button1 = OKAY,
+		hasEditBox = true,
+		editBoxWidth = 350,
+		OnShow = function(self, data)
+			local eb = self.EditBox or self.editBox
+			if eb then
+				eb:SetText(data or "")
+				eb:HighlightText()
+				eb:SetFocus()
+			end
+		end,
+		EditBoxOnEnterPressed = function(self) self:GetParent():Hide() end,
+		EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+		timeout = 0, whileDead = true, hideOnEscape = true,
+	}
+end)
 
 ns.RaiderIOUrl = RaiderIOUrl
 
