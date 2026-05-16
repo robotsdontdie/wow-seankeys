@@ -74,6 +74,11 @@ SlashCmdList.SEANKEYS = function(msg)
 		ns.db.showDebugButton = not ns.db.showDebugButton
 		UpdateDebugButtonVisibility()
 		print("|cffffcc00SeanKeys:|r debug button " .. (ns.db.showDebugButton and "|cff33ff33shown|r" or "|cffff6666hidden|r"))
+	elseif msg == "hudtest" then
+		if ns.MPlusHud and ns.MPlusHud.ToggleTest then
+			local on = ns.MPlusHud.ToggleTest()
+			print("|cffffcc00SeanKeys:|r M+ HUD test " .. (on and "|cff33ff33shown|r (sample data)" or "|cffff6666hidden|r"))
+		end
 	elseif msg == "levels" then
 		print("|cffffcc00SeanKeys:|r dumping frame levels to debug log...")
 		if ns.mainFrame then ns.DumpFrameLevels(ns.mainFrame) end
