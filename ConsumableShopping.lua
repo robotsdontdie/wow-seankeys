@@ -14,42 +14,43 @@ local function Dbg(...) if ns.Dbg then ns.Dbg(...) end end
 -- ----------------------------------------------------------------------------
 -- Current-season consumables — UPDATE EACH SEASON
 --
--- Stub seed values. Item IDs below are placeholders sourced from TWW-era
--- consumables that are still common enough to resolve via the Blizzard item
--- cache. They are intentionally tentative — verify and replace with real
--- Midnight S1 items as the meta settles. See CLAUDE.md "Per-season data
--- tables".
+-- Midnight S1 (Interface 120005). Sourced from Wowhead. See CLAUDE.md
+-- "Per-season data tables".
 --
 -- Schema: CURRENT_SEASON_CONSUMABLES[category] = { { itemID, name }, ... }
--- (name is purely for the picker dropdown; we resolve real names via
---  C_Item.GetItemInfo at runtime.)
+-- (name is purely a fallback for the picker dropdown; we resolve real names
+--  via C_Item.GetItemInfo at runtime once items are cached.)
 -- ----------------------------------------------------------------------------
 ns.CURRENT_SEASON_CONSUMABLES = {
 	food = {
-		{ itemID = 222729, name = "Feast (S1)" },
-		{ itemID = 222731, name = "Stat Food (S1)" },
+		{ itemID = 255845, name = "Silvermoon Parade" },        -- primary-stat feast
+		{ itemID = 255847, name = "Impossibly Royal Roast" },   -- primary-stat feast
+		{ itemID = 242283, name = "Sun-Seared Lumifin" },       -- Crit
+		{ itemID = 242285, name = "Warped Wise Wings" },        -- Mastery
+		{ itemID = 242284, name = "Void-Kissed Fish Rolls" },   -- Versatility
 	},
 	flask = {
-		{ itemID = 212265, name = "Flask of Tempered Mastery" },
-		{ itemID = 212261, name = "Flask of Tempered Versatility" },
-		{ itemID = 212263, name = "Flask of Tempered Aggression" },
-		{ itemID = 212259, name = "Flask of Tempered Swiftness" },
+		{ itemID = 241320, name = "Flask of Thalassian Resistance" }, -- Versatility
+		{ itemID = 241325, name = "Flask of the Blood Knights" },     -- Haste
+		{ itemID = 241322, name = "Flask of the Magisters" },         -- Mastery
 	},
 	combatPotion = {
-		{ itemID = 212265, name = "Tempered Potion" },
-		{ itemID = 211880, name = "Algari Mana Potion" },
+		{ itemID = 241296, name = "Potion of Zealotry" },
+		{ itemID = 241289, name = "Potion of Recklessness" },
+		{ itemID = 241293, name = "Draught of Rampant Abandon" },
 	},
 	healthPotion = {
-		{ itemID = 211878, name = "Cavedweller's Delight" },
+		{ itemID = 241305, name = "Silvermoon Health Potion" },
+		{ itemID = 241300, name = "Lightfused Mana Potion" },
 	},
 	weaponEnchant = {
-		{ itemID = 223718, name = "Algari Mana Oil" },
-		{ itemID = 223719, name = "Algari Manasworn Oil" },
-		{ itemID = 223722, name = "Algari Stoning" },
-		{ itemID = 223723, name = "Algari Striking" },
+		{ itemID = 243733, name = "Thalassian Phoenix Oil" },
+		{ itemID = 243738, name = "Smuggler's Enchanted Edge" },
+		{ itemID = 237370, name = "Refulgent Whetstone" },  -- bladed weapons
+		{ itemID = 237367, name = "Refulgent Weightstone" }, -- blunt weapons
 	},
 	augmentRune = {
-		{ itemID = 224001, name = "Crystallized Augment Rune" },
+		{ itemID = 259085, name = "Void-Touched Augment Rune" },
 	},
 }
 
@@ -254,29 +255,25 @@ local function PopulateRow(row, entry)
 	local have = GetBagCount(entry.itemID)
 	local target = entry.target or 0
 	local deficit = math.max(0, target - have)
-	row.have:SetText(string.format("|cffffffff%d|r / %d", have, target))
+	-- Single "Bags" column: have / target, colored red if short.
+	local countColor = deficit > 0 and "|cffff6666" or "|cffffffff"
+	row.have:SetText(string.format("%s%d|r / %d", countColor, have, target))
 
 	local cache = priceCache[entry.itemID]
 	if deficit == 0 then
-		row.deficit:SetText("|cff33ff33complete|r")
-		row.unitPrice:SetText("")
-		row.totalPrice:SetText("")
+		row.cost:SetText("|cff33ff33complete|r")
 		row.buyBtn:Hide()
+	elseif cache and cache.perUnit then
+		local total = cache.perUnit * deficit
+		row.cost:SetText(string.format("%s |cff888888(%s ea)|r",
+			FormatCoin(total), FormatCoin(cache.perUnit)))
+		row.buyBtn:SetText(string.format("Buy %d", deficit))
+		row.buyBtn:SetEnabled(not InCombatLockdown())
+		row.buyBtn.qty = deficit
+		row.buyBtn:Show()
 	else
-		row.deficit:SetText(string.format("|cffff6666need %d|r", deficit))
-		if cache and cache.perUnit then
-			local total = cache.perUnit * deficit
-			row.unitPrice:SetText(FormatCoin(cache.perUnit))
-			row.totalPrice:SetText(FormatCoin(total))
-			row.buyBtn:SetText(string.format("Buy %d", deficit))
-			row.buyBtn:SetEnabled(not InCombatLockdown())
-			row.buyBtn.qty = deficit
-			row.buyBtn:Show()
-		else
-			row.unitPrice:SetText("|cff888888searching...|r")
-			row.totalPrice:SetText("")
-			row.buyBtn:Hide()
-		end
+		row.cost:SetText("|cff888888searching...|r")
+		row.buyBtn:Hide()
 	end
 end
 
@@ -335,24 +332,14 @@ local function CreateRow(parent, idx)
 	row.have:SetWidth(80)
 	row.have:SetJustifyH("CENTER")
 
-	row.deficit = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	row.deficit:SetPoint("LEFT", row.have, "RIGHT", 4, 0)
-	row.deficit:SetWidth(80)
-	row.deficit:SetJustifyH("CENTER")
-
-	row.unitPrice = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	row.unitPrice:SetPoint("LEFT", row.deficit, "RIGHT", 4, 0)
-	row.unitPrice:SetWidth(90)
-	row.unitPrice:SetJustifyH("RIGHT")
-
-	row.totalPrice = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	row.totalPrice:SetPoint("LEFT", row.unitPrice, "RIGHT", 4, 0)
-	row.totalPrice:SetWidth(110)
-	row.totalPrice:SetJustifyH("RIGHT")
+	row.cost = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	row.cost:SetPoint("LEFT", row.have, "RIGHT", 8, 0)
+	row.cost:SetWidth(220)
+	row.cost:SetJustifyH("RIGHT")
 
 	row.buyBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
 	row.buyBtn:SetSize(78, 22)
-	row.buyBtn:SetPoint("LEFT", row.totalPrice, "RIGHT", 6, 0)
+	row.buyBtn:SetPoint("LEFT", row.cost, "RIGHT", 6, 0)
 	row.buyBtn:SetText("Buy")
 	row.buyBtn:SetScript("OnClick", function(self)
 		if not row.itemID or not self.qty or self.qty <= 0 then return end
@@ -406,12 +393,12 @@ local function BuildContentFrame()
 		fs:SetJustifyH(justify or "LEFT")
 		fs:SetText("|cffffcc00" .. text .. "|r")
 	end
-	H("Category", 50,  110)
-	H("Item",     168, 220)
-	H("In Bags",  392, 80,  "CENTER")
-	H("Need",     476, 80,  "CENTER")
-	H("Per Unit", 560, 90,  "RIGHT")
-	H("Total",    654, 110, "RIGHT")
+	-- X coords are f-relative (parent frame). Row x-positions: row body starts
+	-- at x=12 inside f; icon spans 16..46; category/name share 54..274; bags
+	-- at 282..362 centered; cost at 370..590 right-aligned.
+	H("Item",     54,  220, "LEFT")
+	H("Bags",     282, 80,  "CENTER")
+	H("Cost",     370, 220, "RIGHT")
 
 	contentRows = {}
 	for i = 1, MAX_VISIBLE_ROWS do
