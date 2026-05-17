@@ -193,8 +193,29 @@ end
 -- timer never resolved. Prefer Blizzard's global so a future enum shuffle
 -- doesn't bite us again.
 local CHALLENGE_TIMER_TYPE = _G.LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE or 2
-Dbg(string.format("MPlusHud: CHALLENGE_TIMER_TYPE resolved to %d (LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE=%s, GetWorldElapsedTimers=%s, GetWorldElapsedTime=%s)",
+-- Modern retail returns the timer "type" as the localized description string
+-- (e.g. "Challenge Mode Time"), not the integer enum. There's no reliable
+-- locale global for this string (CHALLENGE_MODE_TIME is nil on current
+-- builds), so we match three ways:
+--   1. The integer enum (older clients / forward-compat)
+--   2. The known English string (covers the most common case directly)
+--   3. Any non-empty string while C_ChallengeMode.IsChallengeModeActive()
+--      is true (locale-agnostic fallback for non-English clients)
+local CHALLENGE_TIMER_NAME = _G.CHALLENGE_MODE_TIME  -- may be nil; that's fine
+local function IsChallengeTimer(timerType)
+	if timerType == CHALLENGE_TIMER_TYPE then return true end
+	if CHALLENGE_TIMER_NAME and timerType == CHALLENGE_TIMER_NAME then return true end
+	if timerType == "Challenge Mode Time" then return true end
+	if type(timerType) == "string" and timerType ~= ""
+		and C_ChallengeMode and C_ChallengeMode.IsChallengeModeActive
+		and C_ChallengeMode.IsChallengeModeActive() then
+		return true
+	end
+	return false
+end
+Dbg(string.format("MPlusHud: CHALLENGE_TIMER_TYPE resolved to %d / name=%s (LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE=%s, GetWorldElapsedTimers=%s, GetWorldElapsedTime=%s)",
 	CHALLENGE_TIMER_TYPE,
+	tostring(CHALLENGE_TIMER_NAME),
 	tostring(_G.LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE),
 	tostring(GetWorldElapsedTimers and "yes" or "no"),
 	tostring(GetWorldElapsedTime and "yes" or "no")))
@@ -223,14 +244,15 @@ local function FindActiveTimer()
 	end
 	for _, timerID in ipairs(ids) do
 		local timerType, elapsed = GetWorldElapsedTime(timerID)
+		local match = IsChallengeTimer(timerType)
 		if shouldLog then
 			Dbg(string.format("  id=%s type=%s(%s) elapsed=%s(%s) match=%s",
 				tostring(timerID),
 				tostring(timerType), type(timerType),
 				tostring(elapsed), type(elapsed),
-				tostring(timerType == CHALLENGE_TIMER_TYPE)))
+				tostring(match)))
 		end
-		if timerType == CHALLENGE_TIMER_TYPE then
+		if match then
 			return timerID, elapsed
 		end
 	end
@@ -246,7 +268,7 @@ local function GetElapsedSeconds()
 	if testMode then return GetTime() - testStartTime end
 	if activeTimerID then
 		local timerType, elapsed = GetWorldElapsedTime(activeTimerID)
-		if timerType == CHALLENGE_TIMER_TYPE and elapsed and elapsed > 0 then
+		if IsChallengeTimer(timerType) and elapsed and elapsed > 0 then
 			if not lastResolvedLogElapsed then
 				Dbg(string.format("GetElapsedSeconds: FIRST RESOLVE via cached id=%s type=%s elapsed=%s",
 					tostring(activeTimerID), tostring(timerType), tostring(elapsed)))
@@ -257,8 +279,9 @@ local function GetElapsedSeconds()
 		-- Cached ID exists but no longer returns a valid timer — log
 		-- once and fall through to re-discover via FindActiveTimer.
 		if (GetTime() - lastTimerLogTime) > 2 then
-			Dbg(string.format("GetElapsedSeconds: cached activeTimerID=%s now returns type=%s elapsed=%s (expected type=%d)",
-				tostring(activeTimerID), tostring(timerType), tostring(elapsed), CHALLENGE_TIMER_TYPE))
+			Dbg(string.format("GetElapsedSeconds: cached activeTimerID=%s now returns type=%s elapsed=%s (expected %d / %s)",
+				tostring(activeTimerID), tostring(timerType), tostring(elapsed),
+				CHALLENGE_TIMER_TYPE, tostring(CHALLENGE_TIMER_NAME)))
 		end
 	end
 	local id, elapsed = FindActiveTimer()
@@ -1048,12 +1071,12 @@ boot:SetScript("OnEvent", function(_, event, arg1)
 		-- an unrelated one and the HUD timer will read 0.
 		if GetWorldElapsedTime then
 			local timerType, elapsed = GetWorldElapsedTime(arg1)
-			local accept = timerType == CHALLENGE_TIMER_TYPE
-			Dbg(string.format("WORLD_STATE_TIMER_START: id=%s type=%s(%s) elapsed=%s expected=%d accept=%s",
+			local accept = IsChallengeTimer(timerType)
+			Dbg(string.format("WORLD_STATE_TIMER_START: id=%s type=%s(%s) elapsed=%s expected=%d/%s accept=%s",
 				tostring(arg1),
 				tostring(timerType), type(timerType),
 				tostring(elapsed),
-				CHALLENGE_TIMER_TYPE, tostring(accept)))
+				CHALLENGE_TIMER_TYPE, tostring(CHALLENGE_TIMER_NAME), tostring(accept)))
 			if accept then
 				activeTimerID = arg1
 				lastResolvedLogElapsed = nil  -- arm the "first resolve" log for this run
