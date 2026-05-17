@@ -34,12 +34,10 @@ ns.CURRENT_SEASON_CONSUMABLES = {
 		{ itemID = 241325, name = "Flask of the Blood Knights" },     -- Haste
 		{ itemID = 241322, name = "Flask of the Magisters" },         -- Mastery
 	},
-	combatPotion = {
+	potion = {
 		{ itemID = 241296, name = "Potion of Zealotry" },
 		{ itemID = 241289, name = "Potion of Recklessness" },
 		{ itemID = 241293, name = "Draught of Rampant Abandon" },
-	},
-	healthPotion = {
 		{ itemID = 241305, name = "Silvermoon Health Potion" },
 		{ itemID = 241300, name = "Lightfused Mana Potion" },
 	},
@@ -49,18 +47,20 @@ ns.CURRENT_SEASON_CONSUMABLES = {
 		{ itemID = 237370, name = "Refulgent Whetstone" },  -- bladed weapons
 		{ itemID = 237367, name = "Refulgent Weightstone" }, -- blunt weapons
 	},
-	augmentRune = {
+	other = {
 		{ itemID = 259085, name = "Void-Touched Augment Rune" },
+		{ itemID = 244639, name = "Void-Touched Drums" },
+		{ itemID = 248486, name = "Emergency Soul Link" },          -- Midnight battle rez
+		{ itemID = 221955, name = "Convincingly Realistic Jumper Cables" }, -- TWW battle rez, still works
 	},
 }
 
 ns.CONSUMABLE_CATEGORIES = {
-	{ key = "food",          label = "Buff Food" },
+	{ key = "food",          label = "Food" },
 	{ key = "flask",         label = "Flask" },
-	{ key = "combatPotion",  label = "Combat Potion" },
-	{ key = "healthPotion",  label = "Health Potion" },
+	{ key = "potion",        label = "Potion" },
 	{ key = "weaponEnchant", label = "Weapon Enchant" },
-	{ key = "augmentRune",   label = "Augment Rune" },
+	{ key = "other",         label = "Other" },
 }
 
 -- ----------------------------------------------------------------------------
@@ -74,13 +74,33 @@ local function CurrentSpecID()
 	return id
 end
 
+-- One-shot migration of pre-rename keys. The previous schema had separate
+-- combatPotion / healthPotion lists and an augmentRune list; both have been
+-- folded (combatPotion + healthPotion -> potion, augmentRune -> other).
+-- Idempotent: nil-checks each legacy key and removes it after merging.
+local function MigrateLegacyKeys(list)
+	if list.combatPotion or list.healthPotion then
+		list.potion = list.potion or {}
+		for _, e in ipairs(list.combatPotion or {}) do list.potion[#list.potion + 1] = e end
+		for _, e in ipairs(list.healthPotion or {}) do list.potion[#list.potion + 1] = e end
+		list.combatPotion = nil
+		list.healthPotion = nil
+	end
+	if list.augmentRune then
+		list.other = list.other or {}
+		for _, e in ipairs(list.augmentRune) do list.other[#list.other + 1] = e end
+		list.augmentRune = nil
+	end
+end
+
 local function GetSpecList(specID)
 	if not specID or not ns.charDb then return nil end
 	ns.charDb.consumables = ns.charDb.consumables or {}
 	local bySpec = ns.charDb.consumables
 	if not bySpec[specID] then
-		bySpec[specID] = { food = {}, flask = {}, combatPotion = {}, healthPotion = {}, weaponEnchant = {}, augmentRune = {} }
+		bySpec[specID] = {}
 	end
+	MigrateLegacyKeys(bySpec[specID])
 	for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES) do
 		bySpec[specID][cat.key] = bySpec[specID][cat.key] or {}
 	end
@@ -267,10 +287,17 @@ local MAX_VISIBLE_ROWS = 11
 
 local contentFrame, contentRows, tabRegistered
 
+-- Gold-only formatter. Pass copper * (gold/copper) via GetCoinTextureString
+-- so we get the standard gold-icon string but with silver/copper stripped.
+-- Consumables shopping always involves stacks worth at least several gold;
+-- the sub-gold portion is just noise. Rounds DOWN so the displayed price
+-- never overstates what the AH will actually charge.
 local function FormatCoin(copper)
 	if not copper or copper <= 0 then return "-" end
-	if GetCoinTextureString then return GetCoinTextureString(math.floor(copper)) end
-	return tostring(math.floor(copper))
+	local gold = math.floor(copper / 10000)
+	if gold == 0 then return "<1g" end
+	if GetCoinTextureString then return GetCoinTextureString(gold * 10000) end
+	return string.format("%dg", gold)
 end
 
 local function PopulateRow(row, item)
