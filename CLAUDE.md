@@ -19,6 +19,7 @@ The WoW AddOn folder **`D:\Blizzard\World of Warcraft\_retail_\Interface\AddOns\
 9. **MDT integration** — right-click a dungeon name to open MDT to that dungeon (if installed).
 10. **Click name to copy Raider.IO URL** to clipboard (via popup, since `CopyToClipboard` is protected).
 11. **Options menu** — an "Options" button bottom-right of the main window opens a small panel. One toggle today: "Listen for ESC to close windows" (default on). Provides an opt-out for users hitting taint problems from our `UISpecialFrames` registration. Requires `/reload` to take effect because we only consult the setting at container build time.
+12. **Consumable shopping** — a custom "Consumables" tab on the auction house showing a per-character, per-spec shopping list (buff food, flask, combat potion, health potion, weapon enchant, augment rune). Each row reports bag count vs. target and, if you're short, per-unit and total commodity prices plus a "Buy N" button that drives `StartCommoditiesPurchase` → `ConfirmCommoditiesPurchase` automatically. A "Settings" button on the tab opens a configuration window (also accessible via `/sk consumables`) where you pick items and target counts per category. The tab kicks off one throttled commodity query per configured item on show.
 
 ## The "three protocols" problem
 
@@ -48,11 +49,14 @@ SeanKeys/
   LootWindow.lua                          -- left-click loot preview window
   KeysWindow.lua                          -- main aggregated keys window
   OptionsWindow.lua                       -- per-account options panel
+  ConsumableSettings.lua                  -- per-spec consumable picker window
+  ConsumableShopping.lua                  -- AH "Consumables" tab + search/buy
   SeanKeys.lua                            -- slim entry: events, slash, season data
   Libs/
     LibStub/LibStub.lua                   -- standard public-domain stub
     LibKeystone/LibKeystone.lua           -- verbatim copy of DBM's v10
     LibSpecialization/LibSpecialization.lua -- verbatim copy of DBM's
+    LibAHTab/LibAHTab.lua                 -- AH custom-tab helper (from Auctionator)
 ```
 
 Load order matches the toc: Libs → Core → Data → Wishlist → LootWindow → KeysWindow → SeanKeys. Cross-file communication goes through the addon namespace `ns` (the second return of `local ADDON_NAME, ns = ...`).
@@ -67,6 +71,8 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - **`LootWindow.lua`** — `CHALLENGE_TO_INSTANCEMAP` season table, EJ resolver (`GetJournalInstance` with 3 fallback paths), `GatherLoot`, `IsGearItem`, `BuildLootFrame`, `ns.ShowLootFor`. Owns the loot frame, gear rows, "other" icon grid, the wishlist star UI, the class/spec selector dropdown, and the dungeon selector dropdown. Holds module-level `active{MapID,KeyLevel,JournalID,ClassID,SpecID}` state; `ShowLootFor` resets these to player defaults each call, `RenderLoot` re-fetches loot from the journal using the current state, `ShowSpecMenu` opens a `MenuUtil` context menu that mutates spec state and calls `RenderLoot` to refresh in place, and `ShowDungeonMenu` → `SwitchToDungeon` does the same for dungeon state (re-resolving `activeJournalID` and refreshing title/portrait, but preserving spec and key level). `UpdateSpecSelectorText` / `UpdateDungeonSelectorText` keep the two subtitles in sync with active state.
 - **`KeysWindow.lua`** — main aggregated window. Owns `mainFrame`, rows, separators, the dynamic section-based layout in `ns.Refresh`, `PopulateRow`, `Toggle`, and the MDT integration (`TryOpenMDT`, `MDT_DungeonIdxFor`, `NormalizeDungeonName`). Custom font `SeanKeysLevelFont` (Skurri 16pt THICKOUTLINE) is created here. Hosts the bottom-right button cluster `[Debug] [Options] [Refresh]`.
 - **`OptionsWindow.lua`** — per-account options panel. `ns.BuildOptionsFrame` builds an anonymous `PortraitFrameTemplate` child of the container at level 2300 with a single `UICheckButtonTemplate` bound to `ns.db.options.listenForEsc`. `ns.ToggleOptions` is the show/hide entry. Toggling the checkbox writes the saved var immediately; the change only takes effect on `/reload` because `Core.lua`'s `GetContainer` only reads `listenForEsc` at container build time.
+- **`ConsumableShopping.lua`** — the AH "Consumables" tab. Owns `ns.CURRENT_SEASON_CONSUMABLES` (the per-category item catalog — update each season), `ns.CONSUMABLE_CATEGORIES` (display order), the search queue, the price cache, and the buy flow. Registers the tab via `LibAHTab-1-0` on `AUCTION_HOUSE_SHOW`. Drains one `C_AuctionHouse.SendSearchQuery` at a time, advancing on `COMMODITY_SEARCH_RESULTS_UPDATED` / `ITEM_SEARCH_RESULTS_UPDATED` and re-trying on `AUCTION_HOUSE_THROTTLED_SYSTEM_READY`. Buy flow: `StartCommoditiesPurchase` → wait for `COMMODITY_PRICE_UPDATED` → `ConfirmCommoditiesPurchase`, all wrapped in `securecallfunction`.
+- **`ConsumableSettings.lua`** — per-character per-spec configuration window. Backed by `SeanKeysCharDB.consumables[specID][category] = { { itemID, target }, ... }`. Rebuilt from scratch on every change via a tiny child-tracking body frame (cheap; ~a dozen frames). `ns.ToggleConsumableSettings` is the show/hide entry. Picker for adding items reads from `ns.CURRENT_SEASON_CONSUMABLES`.
 - **`SeanKeys.lua`** — entry point. Holds `TELEPORT_SPELL_BY_CHALLENGEMAP` (season-specific), slash commands, `UpdateDebugButtonVisibility`, and the boot frame with all event registrations.
 
 ## Slash commands
@@ -76,6 +82,7 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - `/sk debug` — toggle the in-frame "Debug" button (persists in `SeanKeysDB.showDebugButton`)
 - `/sk dump` — print current keystone store to chat
 - `/sk levels` — log current frame-level state of all SeanKeys windows to the debug log and open the debug window (diagnostic for layering issues)
+- `/sk consumables` (or `/sk c`) — open the consumable shopping settings window for the current spec
 
 ## Saved variables
 
@@ -89,18 +96,21 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 
 `SeanKeysCharDB` (per-character):
 - `wishlist[itemID] = { challengeMapID, name, addedAt }` — wishlisted gear; only keyed by itemID (we don't track ilvl/specifics)
+- `consumables[specID][category] = { { itemID, target }, ... }` — consumable shopping list. Keyed by spec so a Resto Shaman and an Elemental Shaman on the same character can carry different lists. `category` ∈ `food | flask | combatPotion | healthPotion | weaponEnchant | augmentRune`.
 
 Note: `fullName` here is the canonical `"Name-NormalizedRealm"` form produced by `FullName(...)`, so alts cached on Realm A can be found from Realm B.
 
 ## Per-season data tables — UPDATE EACH SEASON
 
-Three places have season-specific data:
+Four places have season-specific data:
 
 1. **`TELEPORT_SPELL_BY_CHALLENGEMAP`** (in `SeanKeys.lua`) — `[challengeMapID] = spellID`. Used by the teleport buttons. Source: `Details\Libs\LibOpenRaid\ThingsToMantain_<Expansion>.lua` → `LIB_OPEN_RAID_MYTHIC_PLUS_TELEPORT_SPELLS`.
 
 2. **`CHALLENGE_TO_INSTANCEMAP`** (in `LootWindow.lua`) — `[challengeMapID] = uiMapID` for journal lookup. Must match what `EJ_GetInstanceForMap` accepts. Source: `DBM-Core\modules\gui\Keystones.lua` → `teleportMap` (first element of each entry). For dungeons with "remix" variants (e.g. Magister's Terrace), use the *original* TBC-era uiMapID — that's what the journal indexes under.
 
 3. **`EstimateMinTimedScore(level)`** (in `Core.lua`) — `155 + 15*(L-2) + 15*(breakpoint bumps at L>=5, 7, 10, 12)`. Source of truth: [MrMythical M+ score calculator](https://mrmythical.com/rating-calculator). If Blizzard tweaks the base score or breakpoint levels, update here. Numbers represent the *par-time* minimum — actual timed runs add 0-15 from time bonus, so this stays a true lower bound for the "at least X" tooltip claim.
+
+4. **`CURRENT_SEASON_CONSUMABLES`** (in `ConsumableShopping.lua`) — `[category] = { { itemID, name }, ... }`. The catalog the consumables-settings picker offers under each category. Stub seed values today; refresh once Midnight S1 raid/M+ meta consumables stabilize. Order in each list controls the picker order. The `name` here is just a fallback for the picker UI; we resolve real names via `C_Item.GetItemInfo` once items are cached.
 
 ## Tricky bits / gotchas
 

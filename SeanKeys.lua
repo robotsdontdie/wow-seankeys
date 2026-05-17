@@ -79,6 +79,8 @@ SlashCmdList.SEANKEYS = function(msg)
 			local on = ns.MPlusHud.ToggleTest()
 			print("|cffffcc00SeanKeys:|r M+ HUD test " .. (on and "|cff33ff33shown|r (sample data)" or "|cffff6666hidden|r"))
 		end
+	elseif msg == "consumables" or msg == "c" then
+		if ns.ToggleConsumableSettings then ns.ToggleConsumableSettings() end
 	elseif msg == "levels" then
 		print("|cffffcc00SeanKeys:|r dumping frame levels to debug log...")
 		-- Windows are now anonymous children of SeanKeysContainer, so the
@@ -164,6 +166,7 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 		if ns.BuildLootFrame  then securecallfunction(ns.BuildLootFrame)  end
 		if ns.BuildDebugWindow then securecallfunction(ns.BuildDebugWindow) end
 		if ns.BuildOptionsFrame then securecallfunction(ns.BuildOptionsFrame) end
+		if ns.BuildConsumableSettingsFrame then securecallfunction(ns.BuildConsumableSettingsFrame) end
 		if IsInGuild() then
 			if C_GuildInfo and C_GuildInfo.GuildRoster then
 				securecallfunction(C_GuildInfo.GuildRoster)
