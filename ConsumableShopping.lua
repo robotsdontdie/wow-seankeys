@@ -1,12 +1,10 @@
 local ADDON_NAME, ns = ...
 
 -- ============================================================================
--- ConsumableShopping: a custom Auction House tab that surfaces per-character,
--- per-spec consumable shopping lists. Each row shows your bag count vs. a
--- target, and if you're short, the per-unit and total AH price plus a "Buy"
--- button that drives the commodity-purchase flow end-to-end.
---
--- Companion module: ConsumableSettings.lua (the settings window).
+-- ConsumableShopping: a custom Auction House tab that surfaces per-character
+-- consumable shopping lists organized into user-named profiles. Each row shows
+-- your bag count vs. a target, and if you're short, the per-unit and total AH
+-- price plus a "Buy" button that drives the commodity-purchase flow end-to-end.
 -- ============================================================================
 
 local function Dbg(...) if ns.Dbg then ns.Dbg(...) end end
@@ -21,6 +19,17 @@ local function Dbg(...) if ns.Dbg then ns.Dbg(...) end end
 -- (name is purely a fallback for the picker dropdown; we resolve real names
 --  via C_Item.GetItemInfo at runtime once items are cached.)
 -- ----------------------------------------------------------------------------
+-- Schema notes:
+-- * Each crafted consumable has a separate itemID per quality (commodity AH
+--   queries key on itemID, so Q1 and Q2 list at different prices). To track
+--   them as one row with a quality dropdown, set `qualities = { q1Id, q2Id }`
+--   in the order Q1, Q2. The Add menu always inserts the Q1 itemID; the
+--   dropdown rewrites `entry.itemID` to the chosen quality's variant.
+-- * Sequential-allocation pattern: Midnight allocates consumable itemIDs in
+--   (Q2, Q1) order — the higher numeric ID is Q1, the lower is Q2. Verified
+--   empirically: at the AH, the higher-priced (more expensive = higher
+--   quality = Q1) variant is the larger of the two itemIDs.
+-- * For non-craftable items (single-quality), use `itemID = N` instead.
 ns.CURRENT_SEASON_CONSUMABLES = {
 	food = {
 		{ itemID = 255845, name = "Silvermoon Parade" },        -- primary-stat feast
@@ -30,9 +39,9 @@ ns.CURRENT_SEASON_CONSUMABLES = {
 		{ itemID = 242284, name = "Void-Kissed Fish Rolls" },   -- Versatility
 	},
 	flask = {
-		{ itemID = 241320, name = "Flask of Thalassian Resistance" }, -- Versatility
-		{ itemID = 241325, name = "Flask of the Blood Knights" },     -- Haste
-		{ itemID = 241322, name = "Flask of the Magisters" },         -- Mastery
+		{ qualities = { 241321, 241320 }, name = "Flask of Thalassian Resistance" }, -- Versatility
+		{ qualities = { 241325, 241324 }, name = "Flask of the Blood Knights" },     -- Haste
+		{ qualities = { 241323, 241322 }, name = "Flask of the Magisters" },         -- Mastery
 	},
 	potion = {
 		{ itemID = 241296, name = "Potion of Zealotry" },
@@ -54,6 +63,17 @@ ns.CURRENT_SEASON_CONSUMABLES = {
 	},
 }
 
+-- Normalize: every catalog entry exposes `qualities` (array indexed by tier),
+-- so resolvers don't have to special-case the `itemID = N` shorthand.
+for _, cat in pairs(ns.CURRENT_SEASON_CONSUMABLES) do
+	for _, entry in ipairs(cat) do
+		if not entry.qualities then
+			entry.qualities = { entry.itemID }
+		end
+		entry.itemID = entry.qualities[1]  -- canonical = Q1 (used by Add menu)
+	end
+end
+
 ns.CONSUMABLE_CATEGORIES = {
 	{ key = "food",          label = "Food" },
 	{ key = "flask",         label = "Flask" },
@@ -62,22 +82,49 @@ ns.CONSUMABLE_CATEGORIES = {
 	{ key = "other",         label = "Other" },
 }
 
+-- Midnight crafting tier caps out at Tier 2 — no Tier 3 quality this season.
+local MAX_QUALITY = 2
+
+-- ----------------------------------------------------------------------------
+-- Catalog lookup helpers
+-- ----------------------------------------------------------------------------
+
+-- Find the catalog entry whose `qualities` array contains the given itemID,
+-- plus the index (tier) at which it appears. Returns (catalogEntry, tier).
+local function FindCatalogByItemID(itemID)
+	if not itemID then return nil, nil end
+	for _, cat in pairs(ns.CURRENT_SEASON_CONSUMABLES) do
+		for _, entry in ipairs(cat) do
+			for tier, id in ipairs(entry.qualities or {}) do
+				if id == itemID then return entry, tier end
+			end
+		end
+	end
+	return nil, nil
+end
+
+-- Given the actual itemID currently on a row and a target quality, return the
+-- itemID of the sibling variant at that quality. Falls back to the input
+-- itemID if no catalog mapping exists or the requested quality isn't defined
+-- (e.g. consumables we haven't mapped quality variants for yet — the
+-- dropdown becomes cosmetic for those).
+local function ResolveQualityItemID(currentItemID, targetQuality)
+	local entry = FindCatalogByItemID(currentItemID)
+	if not entry then return currentItemID end
+	return entry.qualities[targetQuality] or currentItemID
+end
+
 -- ----------------------------------------------------------------------------
 -- Data access helpers
 -- ----------------------------------------------------------------------------
 
-local function CurrentSpecID()
-	local idx = GetSpecialization()
-	if not idx then return nil end
-	local id = GetSpecializationInfo(idx)
-	return id
-end
-
--- One-shot migration of pre-rename keys. The previous schema had separate
--- combatPotion / healthPotion lists and an augmentRune list; both have been
--- folded (combatPotion + healthPotion -> potion, augmentRune -> other).
--- Also backfills `quality = 1` on any entry that pre-dates the quality field.
--- Idempotent: nil-checks each legacy key and removes it after merging.
+-- Legacy per-spec key migration: combatPotion / healthPotion -> potion,
+-- augmentRune -> other. Also backfills `quality = 1` on entries that pre-date
+-- the quality field, and clamps quality to MAX_QUALITY (Midnight dropped T3).
+-- Final pass syncs each entry's stored quality with the catalog tier of its
+-- itemID — handy when a pre-existing row stored a Q2 itemID but has
+-- `quality = 1` recorded (the catalog now knows that ID is the Q2 sibling).
+-- Idempotent.
 local function MigrateLegacyKeys(list)
 	if list.combatPotion or list.healthPotion then
 		list.potion = list.potion or {}
@@ -94,28 +141,85 @@ local function MigrateLegacyKeys(list)
 	for _, cat in pairs(list) do
 		if type(cat) == "table" then
 			for _, entry in ipairs(cat) do
-				if type(entry) == "table" and not entry.quality then
-					entry.quality = 1
+				if type(entry) == "table" then
+					if not entry.quality then entry.quality = 1 end
+					if entry.quality > MAX_QUALITY then entry.quality = MAX_QUALITY end
+					local _, catalogTier = FindCatalogByItemID(entry.itemID)
+					if catalogTier and catalogTier ~= entry.quality then
+						entry.quality = catalogTier
+					end
 				end
 			end
 		end
 	end
 end
 
-local function GetSpecList(specID)
-	if not specID or not ns.charDb then return nil end
-	ns.charDb.consumables = ns.charDb.consumables or {}
-	local bySpec = ns.charDb.consumables
-	if not bySpec[specID] then
-		bySpec[specID] = {}
+-- One-shot migration from the previous spec-keyed schema
+-- (`ns.charDb.consumables[specID][category]`) to the new profile-based schema
+-- (`ns.charDb.consumableProfiles = { { name, lists }, ... }`). Each non-empty
+-- spec entry becomes its own profile, named after the spec. Idempotent: nukes
+-- the old key after migration and bails if profiles already exist.
+local function MigrateSpecToProfiles()
+	if not ns.charDb then return end
+	if ns.charDb.consumableProfiles and #ns.charDb.consumableProfiles > 0 then
+		ns.charDb.consumables = nil  -- already migrated; drop stale data
+		return
 	end
-	MigrateLegacyKeys(bySpec[specID])
-	for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES) do
-		bySpec[specID][cat.key] = bySpec[specID][cat.key] or {}
+	ns.charDb.consumableProfiles = ns.charDb.consumableProfiles or {}
+	if type(ns.charDb.consumables) ~= "table" then return end
+	for specID, lists in pairs(ns.charDb.consumables) do
+		if type(lists) == "table" then
+			local hasAny = false
+			for _, cat in pairs(lists) do
+				if type(cat) == "table" and #cat > 0 then hasAny = true; break end
+			end
+			if hasAny then
+				MigrateLegacyKeys(lists)
+				local specName = (ns.SpecName and ns.SpecName(specID))
+					or string.format("Profile %d", #ns.charDb.consumableProfiles + 1)
+				ns.charDb.consumableProfiles[#ns.charDb.consumableProfiles + 1] = {
+					name = specName,
+					lists = lists,
+				}
+			end
+		end
 	end
-	return bySpec[specID]
+	ns.charDb.consumables = nil
 end
-ns.ConsumablesGetSpecList = GetSpecList
+
+local function GetProfiles()
+	if not ns.charDb then return nil end
+	MigrateSpecToProfiles()
+	ns.charDb.consumableProfiles = ns.charDb.consumableProfiles or {}
+	if #ns.charDb.consumableProfiles == 0 then
+		ns.charDb.consumableProfiles[1] = { name = "Profile 1", lists = {} }
+	end
+	local n = #ns.charDb.consumableProfiles
+	if not ns.charDb.activeConsumableProfile
+		or ns.charDb.activeConsumableProfile < 1
+		or ns.charDb.activeConsumableProfile > n then
+		ns.charDb.activeConsumableProfile = 1
+	end
+	return ns.charDb.consumableProfiles
+end
+
+local function ActiveProfile()
+	local profiles = GetProfiles()
+	if not profiles then return nil end
+	local p = profiles[ns.charDb.activeConsumableProfile]
+	if not p then return nil end
+	p.lists = p.lists or {}
+	MigrateLegacyKeys(p.lists)
+	for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES) do
+		p.lists[cat.key] = p.lists[cat.key] or {}
+	end
+	return p
+end
+
+local function ActiveLists()
+	local p = ActiveProfile()
+	return p and p.lists or nil
+end
 
 local function GetBagCount(itemID)
 	if not itemID then return 0 end
@@ -126,21 +230,21 @@ local function GetBagCount(itemID)
 end
 
 -- Build the flat list of {category, itemID, entry, listRef} the tab will
--- display. `entry` is the underlying SeanKeysCharDB entry so inline editors
--- (target qty editbox, remove button) can mutate it directly; `listRef` is the
+-- display. `entry` is the underlying profile entry so inline editors (target
+-- qty editbox, remove button) can mutate it directly; `listRef` is the
 -- category's array for remove operations.
-local function BuildDisplayList(specID)
-	local list = GetSpecList(specID)
-	if not list then return {} end
+local function BuildDisplayList()
+	local lists = ActiveLists()
+	if not lists then return {} end
 	local out = {}
 	for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES) do
-		for _, entry in ipairs(list[cat.key] or {}) do
+		for _, entry in ipairs(lists[cat.key] or {}) do
 			out[#out + 1] = {
 				category = cat.key,
 				label = cat.label,
 				itemID = entry.itemID,
 				entry = entry,
-				listRef = list[cat.key],
+				listRef = lists[cat.key],
 			}
 		end
 	end
@@ -153,7 +257,7 @@ end
 -- Row identity is (itemID, quality). The Add menu always inserts at quality=1
 -- and greys out items that already have a quality-1 row, so re-adding the
 -- same item is only possible after the user changes the existing row's
--- quality. That lets a user track Q1 and Q3 of the same flask as separate
+-- quality. That lets a user track Q1 and Q2 of the same flask as separate
 -- shopping targets.
 -- ----------------------------------------------------------------------------
 
@@ -166,9 +270,6 @@ local function FindEntry(list, itemID, quality)
 end
 
 local function AddEntryAtQ1(list, itemID, target)
-	-- Always inserts a new quality-1 entry. Callers gate duplicates via the
-	-- picker's grey-out, so a quality-1 collision shouldn't reach here, but
-	-- keep the dedupe just in case.
 	if FindEntry(list, itemID, 1) then return end
 	list[#list + 1] = { itemID = itemID, quality = 1, target = target }
 end
@@ -259,7 +360,9 @@ end
 local function EnqueueSearchesForList(list)
 	wipe(searchQueue)
 	for _, entry in ipairs(list) do
-		searchQueue[#searchQueue + 1] = entry.itemID
+		if not priceCache[entry.itemID] then
+			searchQueue[#searchQueue + 1] = entry.itemID
+		end
 	end
 	TryNextSearch()
 end
@@ -301,20 +404,37 @@ local function StartBuy(itemID, qty)
 	securecallfunction(C_AuctionHouse.StartCommoditiesPurchase, itemID, qty)
 end
 
-local function OnCommodityPriceUpdated(itemID, qty)
-	Dbg(string.format("COMMODITY_PRICE_UPDATED: itemID=%s qty=%s pending=%s/%s",
-		tostring(itemID), tostring(qty),
+-- COMMODITY_PRICE_UPDATED fires with (newUnitPrice, newTotalPrice) — NOT
+-- (itemID, quantity) as a naive reading of the AH docs would suggest.
+-- (Verified against Auctionator's CheckPurchase signature.) We track the
+-- intended purchase in `pendingBuy` and just need any-price-update as the
+-- "you may now confirm" signal. Sanity-check the new unit price against the
+-- one we last cached so a sudden spike doesn't auto-buy at 10x.
+local function OnCommodityPriceUpdated(newUnitPrice, newTotalPrice)
+	Dbg(string.format("COMMODITY_PRICE_UPDATED: newUnit=%s newTotal=%s pending=%s/%s",
+		tostring(newUnitPrice), tostring(newTotalPrice),
 		tostring(pendingBuy and pendingBuy.itemID), tostring(pendingBuy and pendingBuy.qty)))
-	if not pendingBuy or pendingBuy.itemID ~= itemID or pendingBuy.qty ~= qty then
-		Dbg("  -> not our purchase, ignoring")
+	if not pendingBuy then
+		Dbg("  -> no pendingBuy, ignoring")
 		return
 	end
 	if not C_AuctionHouse.ConfirmCommoditiesPurchase then
 		Dbg("  -> ConfirmCommoditiesPurchase missing, bailing")
 		return
 	end
-	Dbg(string.format("  -> calling ConfirmCommoditiesPurchase(%d, %d)", itemID, qty))
-	securecallfunction(C_AuctionHouse.ConfirmCommoditiesPurchase, itemID, qty)
+	local cached = priceCache[pendingBuy.itemID]
+	if cached and cached.perUnit and newUnitPrice and newUnitPrice > cached.perUnit * 2 then
+		Dbg(string.format("  -> price spike (cached=%s, new=%s) — cancelling",
+			tostring(cached.perUnit), tostring(newUnitPrice)))
+		if C_AuctionHouse.CancelCommoditiesPurchase then
+			securecallfunction(C_AuctionHouse.CancelCommoditiesPurchase)
+		end
+		pendingBuy = nil
+		return
+	end
+	Dbg(string.format("  -> calling ConfirmCommoditiesPurchase(%d, %d)",
+		pendingBuy.itemID, pendingBuy.qty))
+	securecallfunction(C_AuctionHouse.ConfirmCommoditiesPurchase, pendingBuy.itemID, pendingBuy.qty)
 	pendingBuy = nil
 end
 
@@ -365,8 +485,9 @@ local function PopulateRow(row, item)
 
 	-- Quality icon
 	local quality = item.entry.quality or 1
+	if quality > MAX_QUALITY then quality = MAX_QUALITY end
 	if row.qualityIcon then
-		row.qualityIcon:SetAtlas(string.format("Professions-Icon-Quality-Tier%d-Inv", quality))
+		row.qualityIcon:SetAtlas(string.format("Professions-Icon-Quality-12-Tier%d", quality))
 	end
 
 	-- Target editbox: only update text if the user isn't currently editing it
@@ -393,16 +514,22 @@ local function PopulateRow(row, item)
 	end
 end
 
+local function UpdateProfileBtnText()
+	if not contentFrame or not contentFrame.profileBtn then return end
+	local p = ActiveProfile()
+	contentFrame.profileBtn:SetText(((p and p.name) or "Profile 1") .. "  |TInterface\\ChatFrame\\ChatFrameExpandArrow:12|t")
+end
+
 local function RefreshRows()
 	if not contentFrame or not contentFrame:IsShown() then return end
-	local specID = CurrentSpecID()
-	local list = BuildDisplayList(specID)
-	contentFrame.specLabel:SetText(string.format("Spec: |cffffffff%s|r", (specID and ns.SpecName and ns.SpecName(specID)) or "?"))
+	UpdateProfileBtnText()
+	local list = BuildDisplayList()
 	for i = 1, MAX_VISIBLE_ROWS do
 		contentRows[i]:Hide()
 	end
 	if #list == 0 then
 		contentFrame.empty:Show()
+		contentFrame.overflow:Hide()
 		return
 	end
 	contentFrame.empty:Hide()
@@ -418,6 +545,12 @@ local function RefreshRows()
 end
 ns.ConsumablesRefreshRows = RefreshRows
 
+local function RefreshAll()
+	RefreshRows()
+	local list = BuildDisplayList()
+	EnqueueSearchesForList(list)
+end
+
 local function CreateRow(parent, idx)
 	local row = CreateFrame("Frame", nil, parent)
 	row:SetSize(CONTENT_W - 24, ROW_H)
@@ -432,27 +565,11 @@ local function CreateRow(parent, idx)
 	row.icon:SetPoint("LEFT", 4, 0)
 	row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
-	row.category = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	row.category:SetPoint("LEFT", row.icon, "RIGHT", 8, 8)
-	row.category:SetWidth(110)
-	row.category:SetJustifyH("LEFT")
-
-	row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	row.name:SetPoint("LEFT", row.icon, "RIGHT", 8, -6)
-	row.name:SetWidth(220)
-	row.name:SetJustifyH("LEFT")
-	row.name:SetWordWrap(false)
-
-	row.have = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	row.have:SetPoint("LEFT", row.name, "RIGHT", 8, 0)
-	row.have:SetWidth(40)
-	row.have:SetJustifyH("CENTER")
-
-	-- Quality dropdown: click to pick Q1/Q2/Q3. The icon swaps to the
-	-- corresponding Blizzard profession-quality atlas.
+	-- Quality dropdown: between the icon and the item name. Click to pick
+	-- Q1/Q2 (Midnight crafting caps at T2 — no T3 this season).
 	row.qualityBtn = CreateFrame("Button", nil, row)
 	row.qualityBtn:SetSize(24, 24)
-	row.qualityBtn:SetPoint("LEFT", row.have, "RIGHT", 6, 0)
+	row.qualityBtn:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
 	row.qualityIcon = row.qualityBtn:CreateTexture(nil, "ARTWORK")
 	row.qualityIcon:SetAllPoints()
 	local qHl = row.qualityBtn:CreateTexture(nil, "HIGHLIGHT")
@@ -468,24 +585,53 @@ local function CreateRow(parent, idx)
 		if not MenuUtil or not MenuUtil.CreateContextMenu or not row.entry then return end
 		MenuUtil.CreateContextMenu(self, function(_, menuRoot)
 			menuRoot:CreateTitle("Quality")
-			for q = 1, 3 do
-				local label = string.format("|A:Professions-Icon-Quality-Tier%d-Inv:16:16|a Quality %d", q, q)
+			for q = 1, MAX_QUALITY do
+				local label = string.format("|A:Professions-Icon-Quality-12-Tier%d:16:16|a Quality %d", q, q)
 				menuRoot:CreateRadio(
 					label,
 					function() return (row.entry.quality or 1) == q end,
 					function()
+						-- Swap the row's itemID to the catalog's sibling
+						-- variant for the chosen quality. Falls back to the
+						-- current itemID if this consumable hasn't had its
+						-- quality variants mapped yet — the dropdown is
+						-- cosmetic in that case.
+						local newID = ResolveQualityItemID(row.entry.itemID, q)
+						row.entry.itemID = newID
 						row.entry.quality = q
 						if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
+						-- Kick a price query for the new itemID if it isn't
+						-- already cached.
+						if not priceCache[newID] then
+							searchQueue[#searchQueue + 1] = newID
+							TryNextSearch()
+						end
 					end)
 			end
 		end)
 	end)
 
+	row.category = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	row.category:SetPoint("LEFT", row.qualityBtn, "RIGHT", 8, 8)
+	row.category:SetWidth(110)
+	row.category:SetJustifyH("LEFT")
+
+	row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	row.name:SetPoint("LEFT", row.qualityBtn, "RIGHT", 8, -6)
+	row.name:SetWidth(220)
+	row.name:SetJustifyH("LEFT")
+	row.name:SetWordWrap(false)
+
+	row.have = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	row.have:SetPoint("LEFT", row.name, "RIGHT", 8, 0)
+	row.have:SetWidth(40)
+	row.have:SetJustifyH("CENTER")
+
 	-- Inline target editbox: mutates row.entry.target directly. PopulateRow
 	-- avoids stomping the caret while the user is typing (HasFocus check).
 	row.targetEdit = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
 	row.targetEdit:SetSize(44, 20)
-	row.targetEdit:SetPoint("LEFT", row.qualityBtn, "RIGHT", 8, 0)
+	row.targetEdit:SetPoint("LEFT", row.have, "RIGHT", 8, 0)
 	row.targetEdit:SetAutoFocus(false)
 	row.targetEdit:SetNumeric(true)
 	row.targetEdit:SetMaxLetters(4)
@@ -561,17 +707,15 @@ local function CreateRow(parent, idx)
 	return row
 end
 
--- Category > item submenu picker. Adds a fresh entry to the current spec's
+-- Category > item submenu picker. Adds a fresh entry to the current profile's
 -- list with a default target of 20 and quality=1, then refreshes the tab.
--- Items that already have a quality-1 entry in this spec's list are greyed
+-- Items that already have a quality-1 entry in this profile's list are greyed
 -- out and become no-ops on click — the user has to change the existing row's
 -- quality first (creating a "free" quality-1 slot) before re-adding.
 local function ShowAddMenu(button)
 	if not MenuUtil or not MenuUtil.CreateContextMenu then return end
-	local specID = CurrentSpecID()
-	if not specID then return end
-	local specList = GetSpecList(specID)
-	if not specList then return end
+	local lists = ActiveLists()
+	if not lists then return end
 	MenuUtil.CreateContextMenu(button, function(_, root)
 		root:CreateTitle("Add a consumable")
 		for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES or {}) do
@@ -579,15 +723,17 @@ local function ShowAddMenu(button)
 			local options = (ns.CURRENT_SEASON_CONSUMABLES and ns.CURRENT_SEASON_CONSUMABLES[cat.key]) or {}
 			for _, opt in ipairs(options) do
 				local realName = (C_Item and C_Item.GetItemInfo and C_Item.GetItemInfo(opt.itemID)) or opt.name
-				local alreadyHasQ1 = FindEntry(specList[cat.key], opt.itemID, 1) ~= nil
+				local alreadyHasQ1 = FindEntry(lists[cat.key], opt.itemID, 1) ~= nil
 				local label = alreadyHasQ1 and ("|cff666666" .. realName .. "|r") or realName
 				local entry = catMenu:CreateButton(label, function()
 					if alreadyHasQ1 then return end  -- defensive: also handled by SetEnabled
-					AddEntryAtQ1(specList[cat.key], opt.itemID, 20)
+					AddEntryAtQ1(lists[cat.key], opt.itemID, 20)
 					if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
 					-- Kick a price query for the newly-added item.
-					searchQueue[#searchQueue + 1] = opt.itemID
-					TryNextSearch()
+					if not priceCache[opt.itemID] then
+						searchQueue[#searchQueue + 1] = opt.itemID
+						TryNextSearch()
+					end
 				end)
 				if alreadyHasQ1 and entry and entry.SetEnabled then
 					entry:SetEnabled(false)
@@ -595,6 +741,85 @@ local function ShowAddMenu(button)
 			end
 		end
 	end)
+end
+
+-- ----------------------------------------------------------------------------
+-- Profile management
+-- ----------------------------------------------------------------------------
+
+local function ShowProfileMenu(button)
+	if not MenuUtil or not MenuUtil.CreateContextMenu then return end
+	local profiles = GetProfiles()
+	if not profiles then return end
+	MenuUtil.CreateContextMenu(button, function(_, root)
+		root:CreateTitle("Switch profile")
+		for i, p in ipairs(profiles) do
+			root:CreateRadio(
+				p.name or string.format("Profile %d", i),
+				function() return ns.charDb.activeConsumableProfile == i end,
+				function()
+					ns.charDb.activeConsumableProfile = i
+					RefreshAll()
+				end)
+		end
+	end)
+end
+
+local function AddProfile()
+	local profiles = GetProfiles()
+	if not profiles then return end
+	profiles[#profiles + 1] = {
+		name = string.format("Profile %d", #profiles + 1),
+		lists = {},
+	}
+	ns.charDb.activeConsumableProfile = #profiles
+	RefreshAll()
+end
+
+StaticPopupDialogs["SEANKEYS_CONSUMABLE_RENAME_PROFILE"] = {
+	text = "Rename profile:",
+	button1 = ACCEPT or "Accept",
+	button2 = CANCEL or "Cancel",
+	hasEditBox = true,
+	maxLetters = 32,
+	OnShow = function(self, data)
+		local eb = self.EditBox or self.editBox
+		if eb then
+			eb:SetText(data or "")
+			eb:HighlightText()
+			eb:SetFocus()
+		end
+	end,
+	OnAccept = function(self)
+		local eb = self.EditBox or self.editBox
+		local newName = eb and eb:GetText() or ""
+		newName = strtrim(newName)
+		if newName == "" then return end
+		local profiles = GetProfiles()
+		if not profiles then return end
+		local p = profiles[ns.charDb.activeConsumableProfile]
+		if not p then return end
+		p.name = newName
+		RefreshAll()
+	end,
+	EditBoxOnEnterPressed = function(self)
+		local parent = self:GetParent()
+		if parent.button1 and parent.button1:IsEnabled() then
+			StaticPopupDialogs["SEANKEYS_CONSUMABLE_RENAME_PROFILE"].OnAccept(parent)
+			parent:Hide()
+		end
+	end,
+	EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+	timeout = 0,
+	whileDead = true,
+	hideOnEscape = true,
+}
+
+local function ShowRenameDialog()
+	local profiles = GetProfiles()
+	if not profiles then return end
+	local p = profiles[ns.charDb.activeConsumableProfile]
+	StaticPopup_Show("SEANKEYS_CONSUMABLE_RENAME_PROFILE", nil, nil, p and p.name or "")
 end
 
 local function BuildContentFrame()
@@ -613,8 +838,40 @@ local function BuildContentFrame()
 	f.title:SetPoint("TOPLEFT", 12, -8)
 	f.title:SetText("SeanKeys Consumables")
 
-	f.specLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	f.specLabel:SetPoint("LEFT", f.title, "RIGHT", 16, 0)
+	-- Profile selector: button styled to look like a dropdown, opens a context
+	-- menu of all profiles when clicked. + creates a new profile; Rename
+	-- prompts for a new name for the current one.
+	f.profileBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	f.profileBtn:SetSize(160, 22)
+	f.profileBtn:SetPoint("LEFT", f.title, "RIGHT", 16, 0)
+	f.profileBtn:SetScript("OnClick", function(self) ShowProfileMenu(self) end)
+
+	f.newProfileBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	f.newProfileBtn:SetSize(22, 22)
+	f.newProfileBtn:SetPoint("LEFT", f.profileBtn, "RIGHT", 4, 0)
+	f.newProfileBtn:SetText("+")
+	f.newProfileBtn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("New profile", 1, 1, 1)
+		GameTooltip:Show()
+	end)
+	f.newProfileBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	f.newProfileBtn:SetScript("OnClick", function() AddProfile() end)
+
+	-- Rename button with a pencil glyph. Friz Quadrata renders the U+270E
+	-- "lower right pencil" character fine; tooltip clarifies its purpose
+	-- regardless of font fallback.
+	f.renameBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	f.renameBtn:SetSize(22, 22)
+	f.renameBtn:SetPoint("LEFT", f.newProfileBtn, "RIGHT", 4, 0)
+	f.renameBtn:SetText("\xE2\x9C\x8E")  -- ✎ U+270E
+	f.renameBtn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Rename profile", 1, 1, 1)
+		GameTooltip:Show()
+	end)
+	f.renameBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	f.renameBtn:SetScript("OnClick", function() ShowRenameDialog() end)
 
 	-- Refresh on the right, Add to its left.
 	local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -624,8 +881,7 @@ local function BuildContentFrame()
 	refreshBtn:SetScript("OnClick", function()
 		wipe(priceCache)
 		RefreshRows()
-		local list = BuildDisplayList(CurrentSpecID())
-		EnqueueSearchesForList(list)
+		EnqueueSearchesForList(BuildDisplayList())
 	end)
 
 	local addBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -635,7 +891,10 @@ local function BuildContentFrame()
 	addBtn:SetScript("OnClick", function(self) ShowAddMenu(self) end)
 	f.addBtn = addBtn
 
-	-- Column headers
+	-- Column headers. X coords are f-relative (parent frame). Row body starts
+	-- at x=12; quality button now sits between icon and item, so the Item
+	-- header shifts right and there's no Q column header (the dropdown is
+	-- self-describing on hover).
 	local function H(text, x, w, justify)
 		local fs = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 		fs:SetPoint("TOPLEFT", x, -36)
@@ -643,12 +902,8 @@ local function BuildContentFrame()
 		fs:SetJustifyH(justify or "LEFT")
 		fs:SetText("|cffffcc00" .. text .. "|r")
 	end
-	-- X coords are f-relative (parent frame). Row body starts at x=12;
-	-- icon spans 16..46; category/name 54..274; bags 282..322 centered;
-	-- quality button 328..352; target editbox 360..404; cost 416..596.
-	H("Item",   54,  220, "LEFT")
-	H("Bags",   282, 40,  "CENTER")
-	H("Q",      328, 24,  "CENTER")
+	H("Item",   84,  220, "LEFT")
+	H("Bags",   312, 40,  "CENTER")
 	H("Target", 360, 44,  "CENTER")
 	H("Cost",   416, 180, "RIGHT")
 
@@ -669,9 +924,7 @@ local function BuildContentFrame()
 	-- Drive a fresh search-queue and a refresh whenever the tab body becomes
 	-- visible (tab click or AH reopen with this tab already selected).
 	f:SetScript("OnShow", function()
-		RefreshRows()
-		local list = BuildDisplayList(CurrentSpecID())
-		EnqueueSearchesForList(list)
+		RefreshAll()
 	end)
 
 	contentFrame = f
@@ -710,7 +963,6 @@ ev:RegisterEvent("COMMODITY_PRICE_UNAVAILABLE")
 ev:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
 ev:RegisterEvent("COMMODITY_PURCHASE_FAILED")
 ev:RegisterEvent("BAG_UPDATE_DELAYED")
-ev:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 ev:SetScript("OnEvent", function(self, event, a, b)
 	if event == "AUCTION_HOUSE_SHOW" then
 		RegisterTab()
@@ -736,7 +988,7 @@ ev:SetScript("OnEvent", function(self, event, a, b)
 	elseif event == "COMMODITY_PURCHASE_FAILED" then
 		Dbg("COMMODITY_PURCHASE_FAILED")
 		pendingBuy = nil
-	elseif event == "BAG_UPDATE_DELAYED" or event == "PLAYER_SPECIALIZATION_CHANGED" then
+	elseif event == "BAG_UPDATE_DELAYED" then
 		if contentFrame and contentFrame:IsShown() then RefreshRows() end
 	end
 end)
