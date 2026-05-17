@@ -651,7 +651,10 @@ local function Render()
 	if f._appliedW ~= newW then f:SetWidth(newW); f._appliedW = newW end
 	if f._appliedH ~= newH then f:SetHeight(newH); f._appliedH = newH end
 
-	if not f:IsShown() then f:Show() end
+	if not f:IsShown() then
+		ns.GetContainer():Show()
+		f:Show()
+	end
 
 	-- Cascade into the expanded panel if it's open. Cheap when collapsed
 	-- (RenderPanel early-returns).

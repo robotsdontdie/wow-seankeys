@@ -37,12 +37,37 @@ end
 -- One container reduces that to a single tainted global read per walk.
 -- The four windows become anonymous children of the container, with no
 -- globals and no UISpecialFrames entries of their own. The container's
--- OnHide fans the close out to any visible registered window, then
--- re-shows itself next tick so the next /sk command works normally.
+-- OnHide fans the close out to any visible registered window.
+--
+-- Critical: the container is shown only while at least one registered
+-- window is visible, and hidden otherwise. ToggleGameMenu() first calls
+-- CloseAllWindows(), which walks UISpecialFrames and hides any visible
+-- entry; if anything was visibly closed, the game menu does NOT open.
+-- An always-shown container therefore eats every ESC press — pressing
+-- ESC in town does nothing instead of opening the system menu. Gating
+-- container visibility on its children keeps ESC opening the menu when
+-- no SeanKeys window is up, and closing the window (via the container's
+-- OnHide) when one is.
 -- ----------------------------------------------------------------------------
 
 local container
 local registeredWindows = {}
+
+local function AnyWindowShown()
+	for _, win in ipairs(registeredWindows) do
+		if win and win:IsShown() then return true end
+	end
+	return false
+end
+
+local function UpdateContainerVisibility()
+	if not container then return end
+	if AnyWindowShown() then
+		container:Show()
+	else
+		container:Hide()
+	end
+end
 
 local function GetContainer()
 	if container then return container end
@@ -51,28 +76,31 @@ local function GetContainer()
 	-- to launder the global's taint identity. It didn't work: Blizzard's
 	-- runtime tags the frame itself (the value), not just the _G binding,
 	-- so reads of the global still trip the panel-manager taint check.
-	-- The only path past one-tainted-read-per-CloseWindows-walk is to drop
-	-- the UISpecialFrames entry entirely and lose ESC-to-close — which we
-	-- chose not to do. Staying simple instead.
+	-- We pay one tainted global read per CloseWindows walk; it's wrapped in
+	-- securecall on the Blizzard side, so it doesn't propagate to the
+	-- ToggleGameMenu continuation.
 	container = CreateFrame("Frame", "SeanKeysContainer", UIParent)
 	container:SetAllPoints(UIParent)
-	container:Show()
+	container:Hide()
 	tinsert(UISpecialFrames, "SeanKeysContainer")
-	container:SetScript("OnHide", function(self)
+	container:SetScript("OnHide", function()
 		for _, win in ipairs(registeredWindows) do
 			if win and win:IsShown() then win:Hide() end
 		end
-		-- Re-show the container next tick so subsequent /sk shows work
-		-- without needing to manually re-show the container first. The
-		-- registered windows stay individually hidden because we
-		-- explicitly Hide()'d them above.
-		C_Timer.After(0, function() self:Show() end)
 	end)
 	return container
 end
 
 local function RegisterWindow(frame)
 	table.insert(registeredWindows, frame)
+	-- Hide the container when the last window closes so ESC presses pass
+	-- through to ToggleGameMenu. The complementary show is explicit: each
+	-- call site Show()s the container right before its window (see comment
+	-- on GetContainer). We don't HookScript("OnShow") here because hooking
+	-- a Show on a frame whose parent is hidden has subtle timing issues
+	-- with template chrome that left the window invisible despite both
+	-- flags being set.
+	frame:HookScript("OnHide", UpdateContainerVisibility)
 end
 
 ns.GetContainer = GetContainer
@@ -154,6 +182,7 @@ end
 local function ShowDebugWindow()
 	BuildDebugWindow()
 	debugFrame.editBox:SetText(table.concat(debugLog, "\n"))
+	GetContainer():Show()
 	debugFrame:Show()
 	C_Timer.After(0, function()
 		-- scroll to bottom after Blizzard recalculates content height
@@ -330,11 +359,13 @@ local function ShowCopyUrlPopup(url)
 		ok:SetScript("OnClick", function() p:Hide() end)
 
 		p:Hide()
+		RegisterWindow(p)  -- so closing the popup hides the container too
 		copyUrlPopup = p
 	end
 	copyUrlPopup.editBox:SetText(url or "")
 	copyUrlPopup.editBox:HighlightText()
 	copyUrlPopup.editBox:SetFocus()
+	GetContainer():Show()
 	copyUrlPopup:Show()
 end
 

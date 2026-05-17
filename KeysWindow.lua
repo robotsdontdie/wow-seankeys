@@ -774,6 +774,10 @@ local function Toggle()
 		mainFrame:Hide()
 	else
 		ns.Refresh(true)
+		-- Container hosts every SeanKeys window; it's hidden when no
+		-- window is up (so ESC reaches ToggleGameMenu) and must be shown
+		-- before its child can render. See Core.lua GetContainer.
+		ns.GetContainer():Show()
 		mainFrame:Show()
 	end
 end

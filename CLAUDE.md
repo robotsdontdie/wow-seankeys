@@ -176,7 +176,11 @@ Rows in the main window are NOT positioned at fixed offsets at creation — `Cre
 - Cache-only entries: dungeon name rendered in grey `|cff888888...|r` to signal stale data (but the rest of the row stays in normal colors).
 
 ### ESC to close
-All three windows register their global names in `UISpecialFrames` at build time. Pressing ESC walks that table and hides the first visible entry — standard Blizzard pattern, no panel-manager interaction (so no taint propagation risk). Registration happens once inside each `BuildFrame`/`ShowDebugWindow` (idempotent because BuildFrame early-returns on subsequent calls).
+Every SeanKeys top-level window is an anonymous child of a single named container frame (`SeanKeysContainer`, see `Core.lua` `GetContainer`). The container is the only frame registered in `UISpecialFrames`; its `OnHide` fans the close out to every visible registered window. Per-window globals would each tinge UIParent's panel-manager walks with SeanKeys taint, so the container collapses N taints into one.
+
+**Container visibility must track its children**, not be permanently shown. `ToggleGameMenu()` first calls `CloseAllWindows()`, which walks `UISpecialFrames`; if anything visible gets hidden, the game menu does not open. An always-shown container eats every ESC press — pressing ESC in town does nothing instead of opening the system menu.
+
+The container is shown explicitly at each window's show site (`Toggle`, `ShowLootFor`, `ShowDebugWindow`, HUD `Render`, `ShowCopyUrlPopup`) via `ns.GetContainer():Show()` immediately before the window's own `Show()`. Hiding goes the other way: `RegisterWindow` hooks `OnHide` on each registered window to call `UpdateContainerVisibility`, which hides the container whenever no registered window is visible. Don't try to make the show side automatic with a HookScript on `OnShow` — `Show()` on a frame whose parent is hidden fires OnShow but the template chrome doesn't always render correctly when the show is reactive; explicit ordering (container first, then window) is reliable.
 
 ### Combat lockdown
 - Resize grip uses `f:StartSizing("BOTTOMRIGHT")` — fine in combat.

@@ -805,5 +805,6 @@ function ns.ShowLootFor(challengeMapID, keyLevel)
 
 	activeJournalID = GetJournalInstance(challengeMapID)
 	RenderLoot()
+	ns.GetContainer():Show()
 	f:Show()
 end
