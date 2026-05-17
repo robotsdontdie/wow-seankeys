@@ -71,21 +71,23 @@ end
 
 local function GetContainer()
 	if container then return container end
-	-- We tried creating this anonymously and then writing
-	-- _G["SeanKeysContainer"] = container inside securecallfunction, hoping
-	-- to launder the global's taint identity. It didn't work: Blizzard's
-	-- runtime tags the frame itself (the value), not just the _G binding,
-	-- so reads of the global still trip the panel-manager taint check.
-	-- We pay one tainted global read per CloseWindows walk; it's wrapped in
-	-- securecall on the Blizzard side, so it doesn't propagate to the
-	-- ToggleGameMenu continuation.
+	-- Plain Frame parented to UIParent. Critically: NO protected descendants
+	-- anywhere in the subtree. The keys window's teleport buttons use
+	-- `InsecureActionButtonTemplate` (same template Details and DBM-Core
+	-- use for their M+ teleport rows), which wires up click-to-cast via the
+	-- `type`/`spell` attributes without marking the frame "protected". That
+	-- keeps protection from cascading upward through row → mainFrame →
+	-- container, so `SeanKeysContainer:Hide()` is unprotected and Blizzard's
+	-- CloseAllWindows walk (ESC, death, ToggleGameMenu) can hide it safely
+	-- even though it reads us via the tainted `_G["SeanKeysContainer"]`.
 	container = CreateFrame("Frame", "SeanKeysContainer", UIParent)
 	container:SetAllPoints(UIParent)
 	container:Hide()
-	-- Honor the listen-for-ESC opt-out from OptionsWindow.lua. Default on
-	-- (and treat missing settings as on, which covers the pre-ADDON_LOADED
-	-- window). Toggling this requires /reload because we only consult it
-	-- here, at container build time.
+	-- Honor the listen-for-ESC opt-out (toggled from the debug window's
+	-- footer checkbox; ns.db.options.listenForEsc). Default on (and treat
+	-- missing settings as on, which covers the pre-ADDON_LOADED window).
+	-- Toggling this requires /reload because we only consult it here, at
+	-- container build time.
 	if not ns.db or not ns.db.options or ns.db.options.listenForEsc ~= false then
 		tinsert(UISpecialFrames, "SeanKeysContainer")
 	end
@@ -149,7 +151,8 @@ local function BuildDebugWindow()
 	-- Anonymous: no need for a global name on a private child frame.
 	local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
 	sf:SetPoint("TOPLEFT", 14, -28)
-	sf:SetPoint("BOTTOMRIGHT", -36, 32)
+	-- Bottom anchor leaves room for the footer row (buttons + ESC toggle).
+	sf:SetPoint("BOTTOMRIGHT", -36, 58)
 
 	local eb = CreateFrame("EditBox", nil, sf)
 	eb:SetMultiLine(true)
@@ -179,6 +182,23 @@ local function BuildDebugWindow()
 	f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	f.hint:SetPoint("BOTTOMLEFT", 14, 12)
 	f.hint:SetText("Select text and press Ctrl+C to copy.")
+
+	-- ESC-to-close toggle. Saved var is read by GetContainer at container
+	-- build time, so changes require /reload.
+	local escCb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+	escCb:SetPoint("BOTTOMLEFT", 10, 30)
+	local escLbl = escCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	escLbl:SetPoint("LEFT", escCb, "RIGHT", 2, 1)
+	escLbl:SetText("Listen for ESC to close windows (/reload to take effect)")
+	escCb:SetScript("OnShow", function(self)
+		local on = not ns.db or not ns.db.options or ns.db.options.listenForEsc ~= false
+		self:SetChecked(on)
+	end)
+	escCb:SetScript("OnClick", function(self)
+		if not ns.db then return end
+		ns.db.options = ns.db.options or {}
+		ns.db.options.listenForEsc = self:GetChecked() and true or false
+	end)
 
 	debugFrame = f
 	ns.debugFrame = f  -- exposed for /sk levels diagnostic

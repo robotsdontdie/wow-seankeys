@@ -20,3 +20,6 @@ desktop.ini
 
 # Compiled Lua (we ship sources)
 *.luac
+
+# Local Stuff
+TODO.md

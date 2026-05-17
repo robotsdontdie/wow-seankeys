@@ -126,7 +126,6 @@ boot:RegisterEvent("GUILD_ROSTER_UPDATE")
 boot:RegisterEvent("PLAYER_GUILD_UPDATE")
 boot:RegisterEvent("CHALLENGE_MODE_COMPLETED")
 boot:RegisterEvent("BAG_UPDATE_DELAYED")
-boot:RegisterEvent("PLAYER_REGEN_ENABLED")
 boot:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 boot:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
@@ -158,9 +157,9 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 		-- ADDON_ACTION_FORBIDDEN on UseContainerItem).
 		--
 		-- Pre-building the windows here is the same defensive pattern —
-		-- CreateFrame + SecureActionButtonTemplate setup + tinsert into
-		-- UISpecialFrames is exactly the kind of work that left taint
-		-- residue when MythicPlusHud did it from event handlers.
+		-- CreateFrame + tinsert into UISpecialFrames is exactly the kind of
+		-- work that left taint residue when MythicPlusHud did it from event
+		-- handlers.
 		securecallfunction(ns.PullSelf)
 		securecallfunction(ns.BindLibOpenRaid)
 		if not C_AddOns.IsAddOnLoaded("Blizzard_EncounterJournal") then
@@ -244,12 +243,5 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 		end
 	elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
 		C_Timer.After(0.5, function() securecallfunction(ns.PullSelf) end)
-	elseif event == "PLAYER_REGEN_ENABLED" then
-		-- ProcessPending writes SetAttribute on SecureActionButtonTemplate
-		-- buttons. Wrap in securecallfunction so any taint we accumulate
-		-- iterating + writing attributes doesn't carry SeanKeys identity
-		-- into the post-combat action-bar refresh chain that immediately
-		-- follows PLAYER_REGEN_ENABLED.
-		securecallfunction(ns.ProcessPending)
 	end
 end)

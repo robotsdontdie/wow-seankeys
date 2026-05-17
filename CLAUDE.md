@@ -137,7 +137,7 @@ Rows in the main window are NOT positioned at fixed offsets at creation — `Cre
 - **`PopulateRow` distinguishes "no key" from "unknown" via `entry.source`.** When both live and cached are at level 0: source set = "no key" (we received an explicit broadcast saying they don't have one); source unset = "unknown" (we have no broadcast on file, e.g. a party member whose addon hasn't reported yet). `CollectPartyNames` creates bare shells (`level=0`, no `source`) for party members so we can render their roster row before any keystone broadcast arrives.
 
 ### Secure frames
-- **Teleport buttons** use `SecureActionButtonTemplate` with `type="spell"`. Attribute writes are blocked during combat; updates are queued in `pendingButtonUpdates` and applied on `PLAYER_REGEN_ENABLED` (via `ns.ProcessPending`).
+- **Teleport buttons** use `InsecureActionButtonTemplate` with `type="spell"` — the same template Details (`window_mythickeys.lua`) and DBM-Core (`modules/gui/Keystones.lua`) use for their M+ teleport rows. The insecure variant wires up click-to-cast via the `type`/`spell` attributes without marking the frame "protected", which is critical: a `SecureActionButtonTemplate` would propagate protection up through row → mainFrame → container by descendant-inheritance, making `SeanKeysContainer:Hide()` blocked any time Blizzard's `CloseAllWindows` walk read our tainted `_G["SeanKeysContainer"]` (i.e. every ESC, death, and `ToggleGameMenu`). With the insecure template, nothing in our subtree is protected; Hide/Show is unrestricted in or out of combat, and `SetAttribute` writes don't need to be queued for post-combat.
 - **Anchoring rule**: secure (protected) frames cannot anchor to plain regions (textures/fontstrings). They must anchor to other frames.
 - **`CopyToClipboard`** is protected — addons cannot call it. We use a `StaticPopupDialog` with `EditBox` for the Raider.IO URL flow. The field is `self.EditBox` (capital) in modern retail, `self.editBox` in older versions; the code falls back.
 
@@ -195,7 +195,8 @@ The container is shown explicitly at each window's show site (`Toggle`, `ShowLoo
 
 ### Combat lockdown
 - Resize grip uses `f:StartSizing("BOTTOMRIGHT")` — fine in combat.
-- Secure attribute changes are queued via `pendingButtonUpdates`.
+- Teleport buttons (insecure template) take `SetAttribute` writes in or out of combat — no pending-update queue.
+- Show/Hide on every SeanKeys frame is unrestricted; we deliberately have no protected descendants (see the **Frame strata** + **Secure frames** notes for the InsecureActionButtonTemplate trade).
 - Whisper popup and dialogs are unaffected.
 
 ## Visual styling notes

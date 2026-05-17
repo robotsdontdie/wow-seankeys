@@ -22,7 +22,6 @@ local SEPARATOR_HEIGHT = 10
 local rows = {}
 local separators = {}            -- pre-created horizontal section dividers
 local mainFrame
-local pendingButtonUpdates = {}  -- secure attribute updates queued for combat end
 
 local function VisibleRowCount()
 	if not mainFrame then return DEFAULT_VISIBLE_ROWS end
@@ -30,26 +29,15 @@ local function VisibleRowCount()
 	return math.max(1, math.min(MAX_ROWS, math.floor(avail / ROW_HEIGHT)))
 end
 
-local function ProcessPending()
-	if InCombatLockdown() then return end
-	for btn, info in pairs(pendingButtonUpdates) do
-		btn:SetAttribute("type", "spell")
-		btn:SetAttribute("spell", info.spellID)
-		pendingButtonUpdates[btn] = nil
-	end
-end
-
-ns.ProcessPending = ProcessPending
-
 local function SetTeleportButton(btn, spellID)
 	if not spellID or not IsSpellKnown(spellID) then btn:Hide(); return end
 	btn:Show()
-	if InCombatLockdown() then
-		pendingButtonUpdates[btn] = { spellID = spellID }
-	else
-		btn:SetAttribute("type", "spell")
-		btn:SetAttribute("spell", spellID)
-	end
+	-- InsecureActionButtonTemplate accepts the same `type`/`spell` attributes
+	-- as the secure variant but isn't a protected frame, so SetAttribute is
+	-- legal in or out of combat. Details and DBM-Core both use the insecure
+	-- template for their M+ teleport buttons for exactly this reason.
+	btn:SetAttribute("type", "spell")
+	btn:SetAttribute("spell", spellID)
 	local info = C_Spell.GetSpellInfo(spellID)
 	if info and info.iconID then btn.icon:SetTexture(info.iconID) end
 	btn.tip = info and info.name or "Teleport"
@@ -210,9 +198,12 @@ local function CreateRow(parent, index)
 	row.wishStar:Hide()
 
 	-- Teleport button lives at the start of the Key column, just before the dungeon name.
-	-- Anonymous: any walk that enumerates SecureActionButtonTemplate frames
-	-- by global name would otherwise pull SeanKeys taint via the read.
-	local btn = CreateFrame("Button", nil, row, "SecureActionButtonTemplate")
+	-- InsecureActionButtonTemplate (NOT Secure) — same trick Details and
+	-- DBM-Core use. The insecure template wires up `type`/`spell` attribute
+	-- handling for click-to-cast without marking the frame "protected", so
+	-- ancestor Hide()/Show() doesn't propagate protection upward and the
+	-- container is safe to Hide from CloseAllWindows' tainted-global walk.
+	local btn = CreateFrame("Button", nil, row, "InsecureActionButtonTemplate")
 	btn:SetSize(ROW_HEIGHT - 2, ROW_HEIGHT - 2)
 	btn:SetPoint("LEFT", row, "LEFT", 196, 0)
 	btn:RegisterForClicks("AnyUp", "AnyDown")
@@ -419,15 +410,9 @@ local function BuildFrame()
 	refresh:SetText("Refresh")
 	refresh:SetScript("OnClick", function() ns.Refresh(true) end)
 
-	local optionsBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	optionsBtn:SetSize(70, 20)
-	optionsBtn:SetPoint("RIGHT", refresh, "LEFT", -4, 0)
-	optionsBtn:SetText("Options")
-	optionsBtn:SetScript("OnClick", function() if ns.ToggleOptions then ns.ToggleOptions() end end)
-
 	local debugBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	debugBtn:SetSize(60, 20)
-	debugBtn:SetPoint("RIGHT", optionsBtn, "LEFT", -4, 0)
+	debugBtn:SetPoint("RIGHT", refresh, "LEFT", -4, 0)
 	debugBtn:SetText("Debug")
 	debugBtn:SetScript("OnClick", function() ns.ShowDebugWindow() end)
 	f.debugBtn = debugBtn
@@ -791,8 +776,8 @@ end
 ns.Toggle = Toggle
 
 -- Exposed so SeanKeys.lua can pre-build the frame at PLAYER_LOGIN inside
--- securecallfunction. The 30 SecureActionButtonTemplate teleport buttons
--- (and the UISpecialFrames mutation) are exactly the kind of work that
--- belongs in a clean execution context, not in whatever click chain
--- happens to trigger the first /sk toggle.
+-- securecallfunction. The 30 teleport buttons (and the UISpecialFrames
+-- mutation in the container) are exactly the kind of work that belongs in
+-- a clean execution context, not in whatever click chain happens to
+-- trigger the first /sk toggle.
 ns.BuildKeysFrame = BuildFrame
