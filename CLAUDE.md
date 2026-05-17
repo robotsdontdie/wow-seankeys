@@ -91,7 +91,7 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 
 `SeanKeysCharDB` (per-character):
 - `wishlist[itemID] = { challengeMapID, name, addedAt }` — wishlisted gear; only keyed by itemID (we don't track ilvl/specifics)
-- `consumables[specID][category] = { { itemID, target }, ... }` — consumable shopping list. Keyed by spec so a Resto Shaman and an Elemental Shaman on the same character can carry different lists. `category` ∈ `food | flask | potion | weaponEnchant | other`. Legacy keys (`combatPotion`, `healthPotion`, `augmentRune`) are auto-migrated on read by `MigrateLegacyKeys` in `ConsumableShopping.lua`.
+- `consumables[specID][category] = { { itemID, quality, target }, ... }` — consumable shopping list. Keyed by spec so a Resto Shaman and an Elemental Shaman on the same character can carry different lists. `category` ∈ `food | flask | potion | weaponEnchant | other`. Each entry's identity is `(itemID, quality)` — adds always insert at `quality=1`, and the picker greys out items that already have a quality-1 row in this spec's list. Legacy keys (`combatPotion`, `healthPotion`, `augmentRune`) and entries pre-dating the `quality` field are auto-migrated on read by `MigrateLegacyKeys` in `ConsumableShopping.lua`.
 
 Note: `fullName` here is the canonical `"Name-NormalizedRealm"` form produced by `FullName(...)`, so alts cached on Realm A can be found from Realm B.
 

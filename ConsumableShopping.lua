@@ -50,8 +50,7 @@ ns.CURRENT_SEASON_CONSUMABLES = {
 	other = {
 		{ itemID = 259085, name = "Void-Touched Augment Rune" },
 		{ itemID = 244639, name = "Void-Touched Drums" },
-		{ itemID = 248486, name = "Emergency Soul Link" },          -- Midnight battle rez
-		{ itemID = 221955, name = "Convincingly Realistic Jumper Cables" }, -- TWW battle rez, still works
+		{ itemID = 248486, name = "Emergency Soul Link" },  -- Midnight engineering battle rez
 	},
 }
 
@@ -77,6 +76,7 @@ end
 -- One-shot migration of pre-rename keys. The previous schema had separate
 -- combatPotion / healthPotion lists and an augmentRune list; both have been
 -- folded (combatPotion + healthPotion -> potion, augmentRune -> other).
+-- Also backfills `quality = 1` on any entry that pre-dates the quality field.
 -- Idempotent: nil-checks each legacy key and removes it after merging.
 local function MigrateLegacyKeys(list)
 	if list.combatPotion or list.healthPotion then
@@ -90,6 +90,15 @@ local function MigrateLegacyKeys(list)
 		list.other = list.other or {}
 		for _, e in ipairs(list.augmentRune) do list.other[#list.other + 1] = e end
 		list.augmentRune = nil
+	end
+	for _, cat in pairs(list) do
+		if type(cat) == "table" then
+			for _, entry in ipairs(cat) do
+				if type(entry) == "table" and not entry.quality then
+					entry.quality = 1
+				end
+			end
+		end
 	end
 end
 
@@ -140,26 +149,32 @@ end
 
 -- ----------------------------------------------------------------------------
 -- List mutation helpers (used by Add menu + per-row X button)
+--
+-- Row identity is (itemID, quality). The Add menu always inserts at quality=1
+-- and greys out items that already have a quality-1 row, so re-adding the
+-- same item is only possible after the user changes the existing row's
+-- quality. That lets a user track Q1 and Q3 of the same flask as separate
+-- shopping targets.
 -- ----------------------------------------------------------------------------
 
-local function FindEntry(list, itemID)
+local function FindEntry(list, itemID, quality)
+	quality = quality or 1
 	for i, e in ipairs(list) do
-		if e.itemID == itemID then return i, e end
+		if e.itemID == itemID and (e.quality or 1) == quality then return i, e end
 	end
 	return nil, nil
 end
 
-local function AddOrUpdate(list, itemID, target)
-	local _, existing = FindEntry(list, itemID)
-	if existing then
-		existing.target = target
-		return
-	end
-	list[#list + 1] = { itemID = itemID, target = target }
+local function AddEntryAtQ1(list, itemID, target)
+	-- Always inserts a new quality-1 entry. Callers gate duplicates via the
+	-- picker's grey-out, so a quality-1 collision shouldn't reach here, but
+	-- keep the dedupe just in case.
+	if FindEntry(list, itemID, 1) then return end
+	list[#list + 1] = { itemID = itemID, quality = 1, target = target }
 end
 
-local function RemoveEntry(list, itemID)
-	local idx = FindEntry(list, itemID)
+local function RemoveEntry(list, itemID, quality)
+	local idx = FindEntry(list, itemID, quality)
 	if idx then table.remove(list, idx) end
 end
 
@@ -260,18 +275,45 @@ end
 local pendingBuy   -- { itemID, qty }
 
 local function StartBuy(itemID, qty)
-	if not itemID or not qty or qty <= 0 then return end
-	if InCombatLockdown() then return end
-	if not C_AuctionHouse or not C_AuctionHouse.StartCommoditiesPurchase then return end
+	Dbg(string.format("StartBuy: itemID=%s qty=%s inCombat=%s",
+		tostring(itemID), tostring(qty), tostring(InCombatLockdown())))
+	if not itemID or not qty or qty <= 0 then
+		Dbg("StartBuy: bad args, bailing")
+		return
+	end
+	if InCombatLockdown() then
+		Dbg("StartBuy: combat lockdown, bailing")
+		return
+	end
+	if not C_AuctionHouse or not C_AuctionHouse.StartCommoditiesPurchase then
+		Dbg("StartBuy: C_AuctionHouse.StartCommoditiesPurchase missing, bailing")
+		return
+	end
+	-- The API requires the user to have read the unit price from a recent
+	-- commodity search before they can purchase. Verify we have one.
+	local r = C_AuctionHouse.GetCommoditySearchResultInfo and C_AuctionHouse.GetCommoditySearchResultInfo(itemID, 1)
+	Dbg(string.format("StartBuy: first commodity result unitPrice=%s quantity=%s",
+		tostring(r and r.unitPrice), tostring(r and r.quantity)))
 	pendingBuy = { itemID = itemID, qty = qty }
+	Dbg(string.format("StartBuy: calling StartCommoditiesPurchase(%d, %d)", itemID, qty))
 	-- Wrap in securecallfunction: the AH protected calls walk a panel-manager
 	-- chain we don't want SeanKeys taint propagating into.
 	securecallfunction(C_AuctionHouse.StartCommoditiesPurchase, itemID, qty)
 end
 
 local function OnCommodityPriceUpdated(itemID, qty)
-	if not pendingBuy or pendingBuy.itemID ~= itemID or pendingBuy.qty ~= qty then return end
-	if not C_AuctionHouse.ConfirmCommoditiesPurchase then return end
+	Dbg(string.format("COMMODITY_PRICE_UPDATED: itemID=%s qty=%s pending=%s/%s",
+		tostring(itemID), tostring(qty),
+		tostring(pendingBuy and pendingBuy.itemID), tostring(pendingBuy and pendingBuy.qty)))
+	if not pendingBuy or pendingBuy.itemID ~= itemID or pendingBuy.qty ~= qty then
+		Dbg("  -> not our purchase, ignoring")
+		return
+	end
+	if not C_AuctionHouse.ConfirmCommoditiesPurchase then
+		Dbg("  -> ConfirmCommoditiesPurchase missing, bailing")
+		return
+	end
+	Dbg(string.format("  -> calling ConfirmCommoditiesPurchase(%d, %d)", itemID, qty))
 	securecallfunction(C_AuctionHouse.ConfirmCommoditiesPurchase, itemID, qty)
 	pendingBuy = nil
 end
@@ -320,6 +362,12 @@ local function PopulateRow(row, item)
 	-- separately tells you when you're complete.
 	local countColor = have == 0 and "|cffff4040" or "|cffffd060"
 	row.have:SetText(string.format("%s%d|r", countColor, have))
+
+	-- Quality icon
+	local quality = item.entry.quality or 1
+	if row.qualityIcon then
+		row.qualityIcon:SetAtlas(string.format("Professions-Icon-Quality-Tier%d-Inv", quality))
+	end
 
 	-- Target editbox: only update text if the user isn't currently editing it
 	-- (avoids stomping the caret while they're typing).
@@ -400,11 +448,44 @@ local function CreateRow(parent, idx)
 	row.have:SetWidth(40)
 	row.have:SetJustifyH("CENTER")
 
+	-- Quality dropdown: click to pick Q1/Q2/Q3. The icon swaps to the
+	-- corresponding Blizzard profession-quality atlas.
+	row.qualityBtn = CreateFrame("Button", nil, row)
+	row.qualityBtn:SetSize(24, 24)
+	row.qualityBtn:SetPoint("LEFT", row.have, "RIGHT", 6, 0)
+	row.qualityIcon = row.qualityBtn:CreateTexture(nil, "ARTWORK")
+	row.qualityIcon:SetAllPoints()
+	local qHl = row.qualityBtn:CreateTexture(nil, "HIGHLIGHT")
+	qHl:SetAllPoints()
+	qHl:SetColorTexture(1, 1, 1, 0.15)
+	row.qualityBtn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Click to pick quality", 1, 1, 1)
+		GameTooltip:Show()
+	end)
+	row.qualityBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	row.qualityBtn:SetScript("OnClick", function(self)
+		if not MenuUtil or not MenuUtil.CreateContextMenu or not row.entry then return end
+		MenuUtil.CreateContextMenu(self, function(_, menuRoot)
+			menuRoot:CreateTitle("Quality")
+			for q = 1, 3 do
+				local label = string.format("|A:Professions-Icon-Quality-Tier%d-Inv:16:16|a Quality %d", q, q)
+				menuRoot:CreateRadio(
+					label,
+					function() return (row.entry.quality or 1) == q end,
+					function()
+						row.entry.quality = q
+						if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
+					end)
+			end
+		end)
+	end)
+
 	-- Inline target editbox: mutates row.entry.target directly. PopulateRow
 	-- avoids stomping the caret while the user is typing (HasFocus check).
 	row.targetEdit = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
 	row.targetEdit:SetSize(44, 20)
-	row.targetEdit:SetPoint("LEFT", row.have, "RIGHT", 14, 0)
+	row.targetEdit:SetPoint("LEFT", row.qualityBtn, "RIGHT", 8, 0)
 	row.targetEdit:SetAutoFocus(false)
 	row.targetEdit:SetNumeric(true)
 	row.targetEdit:SetMaxLetters(4)
@@ -419,7 +500,7 @@ local function CreateRow(parent, idx)
 
 	row.cost = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	row.cost:SetPoint("LEFT", row.targetEdit, "RIGHT", 12, 0)
-	row.cost:SetWidth(200)
+	row.cost:SetWidth(180)
 	row.cost:SetJustifyH("RIGHT")
 
 	row.buyBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
@@ -427,7 +508,11 @@ local function CreateRow(parent, idx)
 	row.buyBtn:SetPoint("LEFT", row.cost, "RIGHT", 6, 0)
 	row.buyBtn:SetText("Buy")
 	row.buyBtn:SetScript("OnClick", function(self)
-		if not row.itemID or not self.qty or self.qty <= 0 then return end
+		Dbg(string.format("BuyBtn clicked: itemID=%s qty=%s", tostring(row.itemID), tostring(self.qty)))
+		if not row.itemID or not self.qty or self.qty <= 0 then
+			Dbg("  -> missing itemID or qty, bailing")
+			return
+		end
 		StartBuy(row.itemID, self.qty)
 	end)
 
@@ -453,7 +538,8 @@ local function CreateRow(parent, idx)
 	row.removeBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	row.removeBtn:SetScript("OnClick", function()
 		if not row.itemID or not row.listRef then return end
-		RemoveEntry(row.listRef, row.itemID)
+		local q = row.entry and row.entry.quality or 1
+		RemoveEntry(row.listRef, row.itemID, q)
 		if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
 	end)
 
@@ -476,7 +562,10 @@ local function CreateRow(parent, idx)
 end
 
 -- Category > item submenu picker. Adds a fresh entry to the current spec's
--- list with a default target of 20, then refreshes the tab.
+-- list with a default target of 20 and quality=1, then refreshes the tab.
+-- Items that already have a quality-1 entry in this spec's list are greyed
+-- out and become no-ops on click — the user has to change the existing row's
+-- quality first (creating a "free" quality-1 slot) before re-adding.
 local function ShowAddMenu(button)
 	if not MenuUtil or not MenuUtil.CreateContextMenu then return end
 	local specID = CurrentSpecID()
@@ -490,13 +579,19 @@ local function ShowAddMenu(button)
 			local options = (ns.CURRENT_SEASON_CONSUMABLES and ns.CURRENT_SEASON_CONSUMABLES[cat.key]) or {}
 			for _, opt in ipairs(options) do
 				local realName = (C_Item and C_Item.GetItemInfo and C_Item.GetItemInfo(opt.itemID)) or opt.name
-				catMenu:CreateButton(realName, function()
-					AddOrUpdate(specList[cat.key], opt.itemID, 20)
+				local alreadyHasQ1 = FindEntry(specList[cat.key], opt.itemID, 1) ~= nil
+				local label = alreadyHasQ1 and ("|cff666666" .. realName .. "|r") or realName
+				local entry = catMenu:CreateButton(label, function()
+					if alreadyHasQ1 then return end  -- defensive: also handled by SetEnabled
+					AddEntryAtQ1(specList[cat.key], opt.itemID, 20)
 					if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
 					-- Kick a price query for the newly-added item.
 					searchQueue[#searchQueue + 1] = opt.itemID
 					TryNextSearch()
 				end)
+				if alreadyHasQ1 and entry and entry.SetEnabled then
+					entry:SetEnabled(false)
+				end
 			end
 		end
 	end)
@@ -550,11 +645,12 @@ local function BuildContentFrame()
 	end
 	-- X coords are f-relative (parent frame). Row body starts at x=12;
 	-- icon spans 16..46; category/name 54..274; bags 282..322 centered;
-	-- target editbox 336..380; cost 392..592 right-aligned.
+	-- quality button 328..352; target editbox 360..404; cost 416..596.
 	H("Item",   54,  220, "LEFT")
 	H("Bags",   282, 40,  "CENTER")
-	H("Target", 336, 44,  "CENTER")
-	H("Cost",   392, 200, "RIGHT")
+	H("Q",      328, 24,  "CENTER")
+	H("Target", 360, 44,  "CENTER")
+	H("Cost",   416, 180, "RIGHT")
 
 	contentRows = {}
 	for i = 1, MAX_VISIBLE_ROWS do
@@ -610,6 +706,9 @@ ev:RegisterEvent("COMMODITY_SEARCH_RESULTS_UPDATED")
 ev:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
 ev:RegisterEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
 ev:RegisterEvent("COMMODITY_PRICE_UPDATED")
+ev:RegisterEvent("COMMODITY_PRICE_UNAVAILABLE")
+ev:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
+ev:RegisterEvent("COMMODITY_PURCHASE_FAILED")
 ev:RegisterEvent("BAG_UPDATE_DELAYED")
 ev:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 ev:SetScript("OnEvent", function(self, event, a, b)
@@ -628,6 +727,15 @@ ev:SetScript("OnEvent", function(self, event, a, b)
 		TryNextSearch()
 	elseif event == "COMMODITY_PRICE_UPDATED" then
 		OnCommodityPriceUpdated(a, b)
+	elseif event == "COMMODITY_PRICE_UNAVAILABLE" then
+		Dbg(string.format("COMMODITY_PRICE_UNAVAILABLE: itemID=%s", tostring(a)))
+		pendingBuy = nil
+	elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
+		Dbg("COMMODITY_PURCHASE_SUCCEEDED")
+		pendingBuy = nil
+	elseif event == "COMMODITY_PURCHASE_FAILED" then
+		Dbg("COMMODITY_PURCHASE_FAILED")
+		pendingBuy = nil
 	elseif event == "BAG_UPDATE_DELAYED" or event == "PLAYER_SPECIALIZATION_CHANGED" then
 		if contentFrame and contentFrame:IsShown() then RefreshRows() end
 	end
