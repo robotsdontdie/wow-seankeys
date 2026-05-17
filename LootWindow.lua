@@ -309,13 +309,16 @@ local lootFrame, lootRows, otherIcons
 -- State for the active loot view. Reset on each ShowLootFor (per the spec
 -- "default to current spec"). The spec selector dropdown mutates
 -- activeClassID/activeSpecID and calls RenderLoot to refresh in place.
+-- The dungeon selector dropdown mutates activeMapID/activeJournalID and
+-- preserves activeKeyLevel + spec selection across switches.
 local activeMapID, activeKeyLevel, activeJournalID
 local activeClassID, activeSpecID
 
--- Forward declarations: BuildLootFrame's OnClick captures ShowSpecMenu before
--- the function is defined. Declaring them as file-locals up here lets the
--- closure bind to the same upvalue we later assign.
+-- Forward declarations: BuildLootFrame's OnClick captures ShowSpecMenu and
+-- ShowDungeonMenu before they're defined. Declaring them as file-locals up
+-- here lets the closures bind to the same upvalues we later assign.
 local UpdateSpecSelectorText, ShowSpecMenu, RenderLoot
+local UpdateDungeonSelectorText, ShowDungeonMenu, SwitchToDungeon
 
 local function ClassDisplay(classID)
 	if not classID then return nil, nil end
@@ -384,9 +387,9 @@ local function BuildLootFrame()
 	-- the container's OnHide (see Core.lua GetContainer).
 	local f = CreateFrame("Frame", nil, ns.GetContainer(), "PortraitFrameTemplate")
 	ns.RegisterWindow(f)
-	-- height = chrome + gear rows + other-items section + footer
+	-- height = chrome + dungeon selector row + gear rows + other-items section + footer
 	local otherSectionH = 24 + (OTHER_ICON_SIZE + 4) * OTHER_MAX_ROWS
-	f:SetSize(LOOT_FRAME_W, 80 + LOOT_ROW_H * LOOT_NUM_GEAR_ROWS + otherSectionH + 24)
+	f:SetSize(LOOT_FRAME_W, 102 + LOOT_ROW_H * LOOT_NUM_GEAR_ROWS + otherSectionH + 24)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("MEDIUM")
 	-- Higher than the keys window's 500 so the loot popup floats above it
@@ -405,12 +408,40 @@ local function BuildLootFrame()
 	-- Title and portrait set per-dungeon by ShowLootFor.
 	if f.Inset and f.Inset.Bg then f.Inset.Bg:SetAlpha(0.7) end
 
+	-- Dungeon selector: teleport icon + dungeon name + arrow, sits above the
+	-- spec selector. Clicking opens a context menu of current-season dungeons.
+	-- Mirror the spec selector's geometry so the two read as a uniform pair.
+	f.dungeonSelector = CreateFrame("Button", nil, f)
+	f.dungeonSelector:SetSize(LOOT_FRAME_W - 60, 22)
+	f.dungeonSelector:SetPoint("TOP", 0, -28)
+	f.dungeonSelector.icon = f.dungeonSelector:CreateTexture(nil, "OVERLAY")
+	f.dungeonSelector.icon:SetSize(20, 20)
+	f.dungeonSelector.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	f.dungeonSelector.text = f.dungeonSelector:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	f.dungeonSelector.text:SetPoint("CENTER")
+	f.dungeonSelector.text:SetJustifyH("CENTER")
+	f.dungeonSelector.icon:SetPoint("RIGHT", f.dungeonSelector.text, "LEFT", -4, 0)
+	f.dungeonSelector.arrow = f.dungeonSelector:CreateTexture(nil, "OVERLAY")
+	f.dungeonSelector.arrow:SetSize(10, 10)
+	f.dungeonSelector.arrow:SetPoint("LEFT", f.dungeonSelector.text, "RIGHT", 2, -1)
+	f.dungeonSelector.arrow:SetTexture("Interface\\ChatFrame\\ChatFrameExpandArrow")
+	local dhl = f.dungeonSelector:CreateTexture(nil, "HIGHLIGHT")
+	dhl:SetAllPoints()
+	dhl:SetColorTexture(1, 1, 1, 0.08)
+	f.dungeonSelector:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Click to switch dungeon", 0.7, 0.7, 0.7)
+		GameTooltip:Show()
+	end)
+	f.dungeonSelector:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	f.dungeonSelector:SetScript("OnClick", function(self) ShowDungeonMenu(self) end)
+
 	-- Clickable subtitle: shows the active class+spec+preview level and opens
 	-- a class>spec context menu when clicked. The text is set by
 	-- UpdateSpecSelectorText below.
 	f.specSelector = CreateFrame("Button", nil, f)
 	f.specSelector:SetSize(LOOT_FRAME_W - 60, 22)
-	f.specSelector:SetPoint("TOP", 0, -28)
+	f.specSelector:SetPoint("TOP", 0, -50)
 	f.specSelector.text = f.specSelector:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	-- Center-anchored with no width constraint so the FontString sizes to its
 	-- content; the arrow anchors to the text's right edge so it sits flush with
@@ -436,7 +467,7 @@ local function BuildLootFrame()
 	-- Headers
 	local hdr = CreateFrame("Frame", nil, f)
 	hdr:SetSize(LOOT_FRAME_W - 20, 16)
-	hdr:SetPoint("TOPLEFT", 10, -52)
+	hdr:SetPoint("TOPLEFT", 10, -74)
 	local function H(text, x, w)
 		local fs = hdr:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 		fs:SetPoint("LEFT", x, 0)
@@ -452,7 +483,7 @@ local function BuildLootFrame()
 	for i = 1, LOOT_NUM_GEAR_ROWS do
 		local row = CreateFrame("Frame", nil, f)
 		row:SetSize(LOOT_FRAME_W - 20, LOOT_ROW_H)
-		row:SetPoint("TOPLEFT", 10, -70 - (i - 1) * LOOT_ROW_H)
+		row:SetPoint("TOPLEFT", 10, -92 - (i - 1) * LOOT_ROW_H)
 
 		row.bg = row:CreateTexture(nil, "BACKGROUND")
 		row.bg:SetAllPoints()
@@ -535,7 +566,7 @@ local function BuildLootFrame()
 	end
 
 	-- "Other Items" heading and icon grid below the gear rows.
-	local otherY = -70 - LOOT_NUM_GEAR_ROWS * LOOT_ROW_H - 4
+	local otherY = -92 - LOOT_NUM_GEAR_ROWS * LOOT_ROW_H - 4
 	f.otherHeading = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	f.otherHeading:SetPoint("TOPLEFT", 10, otherY)
 	f.otherHeading:SetText("|cffffcc00Other Items|r")
@@ -684,6 +715,83 @@ ShowSpecMenu = function(button)
 	end)
 end
 
+UpdateDungeonSelectorText = function(f)
+	if not f or not f.dungeonSelector then return end
+	local name, _, _, tex = nil, nil, nil, nil
+	if activeMapID and C_ChallengeMode and C_ChallengeMode.GetMapUIInfo then
+		name, _, _, tex = C_ChallengeMode.GetMapUIInfo(activeMapID)
+	end
+	f.dungeonSelector.text:SetText(name or "(no dungeon)")
+	local spellID = ns.TELEPORT_SPELL_BY_CHALLENGEMAP and ns.TELEPORT_SPELL_BY_CHALLENGEMAP[activeMapID or 0]
+	local iconID
+	if spellID then
+		local info = C_Spell.GetSpellInfo(spellID)
+		iconID = info and info.iconID
+	end
+	-- Fall back to the dungeon portrait if we don't know a teleport spell yet
+	-- (mid-season additions, or season rollover before the spell ID table is
+	-- updated).
+	if not iconID then iconID = tex end
+	if iconID then
+		f.dungeonSelector.icon:SetTexture(iconID)
+		f.dungeonSelector.icon:Show()
+	else
+		f.dungeonSelector.icon:Hide()
+	end
+end
+
+-- Switch the active dungeon without resetting spec or key level. Refreshes
+-- title/portrait the same way ShowLootFor does, then re-resolves the journal
+-- instance and re-renders. Used by the dungeon-selector dropdown only — the
+-- main-window click path still goes through ShowLootFor (which resets spec).
+SwitchToDungeon = function(challengeMapID)
+	if not challengeMapID or challengeMapID == activeMapID then return end
+	activeMapID = challengeMapID
+	local f = lootFrame
+	if not f then return end
+	local mapName, _, _, mapTexture
+	if C_ChallengeMode and C_ChallengeMode.GetMapUIInfo then
+		mapName, _, _, mapTexture = C_ChallengeMode.GetMapUIInfo(challengeMapID)
+	end
+	local titleText = (mapName or ns.GetDungeonName(challengeMapID) or "Dungeon") .. " Loot"
+	if f.SetTitle then f:SetTitle(titleText) elseif f.TitleText then f.TitleText:SetText(titleText) end
+	if mapTexture then
+		if f.SetPortraitToAsset then
+			f:SetPortraitToAsset(mapTexture)
+		elseif f.portrait then
+			f.portrait:SetTexture(mapTexture)
+		elseif f.PortraitContainer and f.PortraitContainer.portrait then
+			f.PortraitContainer.portrait:SetTexture(mapTexture)
+		end
+	end
+	activeJournalID = GetJournalInstance(challengeMapID)
+	RenderLoot()
+end
+
+ShowDungeonMenu = function(button)
+	if not MenuUtil or not MenuUtil.CreateContextMenu then
+		Dbg("ShowDungeonMenu: MenuUtil unavailable")
+		return
+	end
+	local entries = {}
+	if ns.TELEPORT_SPELL_BY_CHALLENGEMAP then
+		for mapID in pairs(ns.TELEPORT_SPELL_BY_CHALLENGEMAP) do
+			local name = C_ChallengeMode and C_ChallengeMode.GetMapUIInfo and C_ChallengeMode.GetMapUIInfo(mapID)
+			if name then entries[#entries + 1] = { mapID = mapID, name = name } end
+		end
+	end
+	table.sort(entries, function(a, b) return a.name < b.name end)
+	MenuUtil.CreateContextMenu(button, function(owner, root)
+		root:CreateTitle("Switch dungeon")
+		for _, e in ipairs(entries) do
+			root:CreateRadio(
+				e.name,
+				function() return activeMapID == e.mapID end,
+				function() SwitchToDungeon(e.mapID) end)
+		end
+	end)
+end
+
 -- Re-fetch and re-render the loot grid for the active dungeon + spec. Safe to
 -- call repeatedly without re-resolving the journal instance — used both by
 -- ShowLootFor (initial render) and the spec selector dropdown (re-render).
@@ -691,6 +799,7 @@ RenderLoot = function()
 	local f = lootFrame
 	if not f then return end
 	UpdateSpecSelectorText(f)
+	UpdateDungeonSelectorText(f)
 
 	local function HideAll()
 		for i = 1, LOOT_NUM_GEAR_ROWS do lootRows[i]:Hide() end
