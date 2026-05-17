@@ -96,18 +96,51 @@ local function GetBagCount(itemID)
 	return GetItemCount(itemID) or 0
 end
 
--- Build the flat list of { category, itemID, target } the tab will display.
--- One entry per configured consumable in the current spec.
+-- Build the flat list of {category, itemID, entry, listRef} the tab will
+-- display. `entry` is the underlying SeanKeysCharDB entry so inline editors
+-- (target qty editbox, remove button) can mutate it directly; `listRef` is the
+-- category's array for remove operations.
 local function BuildDisplayList(specID)
 	local list = GetSpecList(specID)
 	if not list then return {} end
 	local out = {}
 	for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES) do
 		for _, entry in ipairs(list[cat.key] or {}) do
-			out[#out + 1] = { category = cat.key, label = cat.label, itemID = entry.itemID, target = entry.target or 0 }
+			out[#out + 1] = {
+				category = cat.key,
+				label = cat.label,
+				itemID = entry.itemID,
+				entry = entry,
+				listRef = list[cat.key],
+			}
 		end
 	end
 	return out
+end
+
+-- ----------------------------------------------------------------------------
+-- List mutation helpers (used by Add menu + per-row X button)
+-- ----------------------------------------------------------------------------
+
+local function FindEntry(list, itemID)
+	for i, e in ipairs(list) do
+		if e.itemID == itemID then return i, e end
+	end
+	return nil, nil
+end
+
+local function AddOrUpdate(list, itemID, target)
+	local _, existing = FindEntry(list, itemID)
+	if existing then
+		existing.target = target
+		return
+	end
+	list[#list + 1] = { itemID = itemID, target = target }
+end
+
+local function RemoveEntry(list, itemID)
+	local idx = FindEntry(list, itemID)
+	if idx then table.remove(list, idx) end
 end
 
 -- ----------------------------------------------------------------------------
@@ -240,26 +273,34 @@ local function FormatCoin(copper)
 	return tostring(math.floor(copper))
 end
 
-local function PopulateRow(row, entry)
+local function PopulateRow(row, item)
 	row:Show()
-	row.itemID = entry.itemID
-	row.target = entry.target
+	row.itemID = item.itemID
+	row.entry = item.entry
+	row.listRef = item.listRef
 
 	-- Icon + name
-	local icon = GetItemIcon(entry.itemID) or 134400
+	local icon = GetItemIcon(item.itemID) or 134400
 	row.icon:SetTexture(icon)
-	local name = (C_Item and C_Item.GetItemInfo and C_Item.GetItemInfo(entry.itemID)) or GetItemInfo(entry.itemID)
-	row.name:SetText(name or string.format("Item %d", entry.itemID))
-	row.category:SetText(entry.label)
+	local name = (C_Item and C_Item.GetItemInfo and C_Item.GetItemInfo(item.itemID)) or GetItemInfo(item.itemID)
+	row.name:SetText(name or string.format("Item %d", item.itemID))
+	row.category:SetText(item.label)
 
-	local have = GetBagCount(entry.itemID)
-	local target = entry.target or 0
+	local have = GetBagCount(item.itemID)
+	local target = (item.entry.target) or 0
 	local deficit = math.max(0, target - have)
-	-- Single "Bags" column: have / target, colored red if short.
-	local countColor = deficit > 0 and "|cffff6666" or "|cffffffff"
-	row.have:SetText(string.format("%s%d|r / %d", countColor, have, target))
+	-- Bag count color: red at 0, yellow when we have any. The cost cell
+	-- separately tells you when you're complete.
+	local countColor = have == 0 and "|cffff4040" or "|cffffd060"
+	row.have:SetText(string.format("%s%d|r", countColor, have))
 
-	local cache = priceCache[entry.itemID]
+	-- Target editbox: only update text if the user isn't currently editing it
+	-- (avoids stomping the caret while they're typing).
+	if row.targetEdit and not row.targetEdit:HasFocus() then
+		row.targetEdit:SetText(tostring(target))
+	end
+
+	local cache = priceCache[item.itemID]
 	if deficit == 0 then
 		row.cost:SetText("|cff33ff33complete|r")
 		row.buyBtn:Hide()
@@ -329,16 +370,33 @@ local function CreateRow(parent, idx)
 
 	row.have = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	row.have:SetPoint("LEFT", row.name, "RIGHT", 8, 0)
-	row.have:SetWidth(80)
+	row.have:SetWidth(40)
 	row.have:SetJustifyH("CENTER")
 
+	-- Inline target editbox: mutates row.entry.target directly. PopulateRow
+	-- avoids stomping the caret while the user is typing (HasFocus check).
+	row.targetEdit = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
+	row.targetEdit:SetSize(44, 20)
+	row.targetEdit:SetPoint("LEFT", row.have, "RIGHT", 14, 0)
+	row.targetEdit:SetAutoFocus(false)
+	row.targetEdit:SetNumeric(true)
+	row.targetEdit:SetMaxLetters(4)
+	row.targetEdit:SetScript("OnTextChanged", function(self)
+		if row.entry then
+			row.entry.target = tonumber(self:GetText()) or 0
+		end
+		if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
+	end)
+	row.targetEdit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+	row.targetEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+
 	row.cost = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	row.cost:SetPoint("LEFT", row.have, "RIGHT", 8, 0)
-	row.cost:SetWidth(220)
+	row.cost:SetPoint("LEFT", row.targetEdit, "RIGHT", 12, 0)
+	row.cost:SetWidth(200)
 	row.cost:SetJustifyH("RIGHT")
 
 	row.buyBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-	row.buyBtn:SetSize(78, 22)
+	row.buyBtn:SetSize(72, 22)
 	row.buyBtn:SetPoint("LEFT", row.cost, "RIGHT", 6, 0)
 	row.buyBtn:SetText("Buy")
 	row.buyBtn:SetScript("OnClick", function(self)
@@ -346,18 +404,75 @@ local function CreateRow(parent, idx)
 		StartBuy(row.itemID, self.qty)
 	end)
 
-	-- Tooltip on hover for the item icon/name area.
-	row:EnableMouse(true)
-	row:SetScript("OnEnter", function(self)
-		if not self.itemID then return end
+	-- Small clear-X delete button. Matches the same atlas SeanKeys uses
+	-- elsewhere for inline remove actions.
+	row.removeBtn = CreateFrame("Button", nil, row)
+	row.removeBtn:SetSize(18, 18)
+	row.removeBtn:SetPoint("LEFT", row.buyBtn, "RIGHT", 6, 0)
+	local rmIcon = row.removeBtn:CreateTexture(nil, "ARTWORK")
+	rmIcon:SetAllPoints()
+	rmIcon:SetAtlas("common-search-clearbutton")
+	row.removeBtn:SetNormalTexture(rmIcon)
+	local rmHl = row.removeBtn:CreateTexture(nil, "HIGHLIGHT")
+	rmHl:SetAllPoints()
+	rmHl:SetAtlas("common-search-clearbutton")
+	rmHl:SetBlendMode("ADD")
+	rmHl:SetAlpha(0.5)
+	row.removeBtn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetItemByID(self.itemID)
+		GameTooltip:SetText("Remove from list", 1, 1, 1)
 		GameTooltip:Show()
 	end)
-	row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	row.removeBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	row.removeBtn:SetScript("OnClick", function()
+		if not row.itemID or not row.listRef then return end
+		RemoveEntry(row.listRef, row.itemID)
+		if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
+	end)
+
+	-- Tooltip on hover for the item icon area only (so it doesn't blanket
+	-- the row and block the inline controls).
+	row.icon:SetDrawLayer("ARTWORK")
+	row.iconHit = CreateFrame("Frame", nil, row)
+	row.iconHit:SetAllPoints(row.icon)
+	row.iconHit:EnableMouse(true)
+	row.iconHit:SetScript("OnEnter", function()
+		if not row.itemID then return end
+		GameTooltip:SetOwner(row.iconHit, "ANCHOR_RIGHT")
+		GameTooltip:SetItemByID(row.itemID)
+		GameTooltip:Show()
+	end)
+	row.iconHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 	row:Hide()
 	return row
+end
+
+-- Category > item submenu picker. Adds a fresh entry to the current spec's
+-- list with a default target of 20, then refreshes the tab.
+local function ShowAddMenu(button)
+	if not MenuUtil or not MenuUtil.CreateContextMenu then return end
+	local specID = CurrentSpecID()
+	if not specID then return end
+	local specList = GetSpecList(specID)
+	if not specList then return end
+	MenuUtil.CreateContextMenu(button, function(_, root)
+		root:CreateTitle("Add a consumable")
+		for _, cat in ipairs(ns.CONSUMABLE_CATEGORIES or {}) do
+			local catMenu = root:CreateButton(cat.label)
+			local options = (ns.CURRENT_SEASON_CONSUMABLES and ns.CURRENT_SEASON_CONSUMABLES[cat.key]) or {}
+			for _, opt in ipairs(options) do
+				local realName = (C_Item and C_Item.GetItemInfo and C_Item.GetItemInfo(opt.itemID)) or opt.name
+				catMenu:CreateButton(realName, function()
+					AddOrUpdate(specList[cat.key], opt.itemID, 20)
+					if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
+					-- Kick a price query for the newly-added item.
+					searchQueue[#searchQueue + 1] = opt.itemID
+					TryNextSearch()
+				end)
+			end
+		end
+	end)
 end
 
 local function BuildContentFrame()
@@ -379,11 +494,24 @@ local function BuildContentFrame()
 	f.specLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 	f.specLabel:SetPoint("LEFT", f.title, "RIGHT", 16, 0)
 
-	local settings = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	settings:SetSize(90, 22)
-	settings:SetPoint("TOPRIGHT", -12, -8)
-	settings:SetText("Settings")
-	settings:SetScript("OnClick", function() if ns.ToggleConsumableSettings then ns.ToggleConsumableSettings() end end)
+	-- Refresh on the right, Add to its left.
+	local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	refreshBtn:SetSize(80, 22)
+	refreshBtn:SetPoint("TOPRIGHT", -12, -8)
+	refreshBtn:SetText("Refresh")
+	refreshBtn:SetScript("OnClick", function()
+		wipe(priceCache)
+		RefreshRows()
+		local list = BuildDisplayList(CurrentSpecID())
+		EnqueueSearchesForList(list)
+	end)
+
+	local addBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	addBtn:SetSize(80, 22)
+	addBtn:SetPoint("RIGHT", refreshBtn, "LEFT", -4, 0)
+	addBtn:SetText("Add...")
+	addBtn:SetScript("OnClick", function(self) ShowAddMenu(self) end)
+	f.addBtn = addBtn
 
 	-- Column headers
 	local function H(text, x, w, justify)
@@ -393,12 +521,13 @@ local function BuildContentFrame()
 		fs:SetJustifyH(justify or "LEFT")
 		fs:SetText("|cffffcc00" .. text .. "|r")
 	end
-	-- X coords are f-relative (parent frame). Row x-positions: row body starts
-	-- at x=12 inside f; icon spans 16..46; category/name share 54..274; bags
-	-- at 282..362 centered; cost at 370..590 right-aligned.
-	H("Item",     54,  220, "LEFT")
-	H("Bags",     282, 80,  "CENTER")
-	H("Cost",     370, 220, "RIGHT")
+	-- X coords are f-relative (parent frame). Row body starts at x=12;
+	-- icon spans 16..46; category/name 54..274; bags 282..322 centered;
+	-- target editbox 336..380; cost 392..592 right-aligned.
+	H("Item",   54,  220, "LEFT")
+	H("Bags",   282, 40,  "CENTER")
+	H("Target", 336, 44,  "CENTER")
+	H("Cost",   392, 200, "RIGHT")
 
 	contentRows = {}
 	for i = 1, MAX_VISIBLE_ROWS do
@@ -407,7 +536,7 @@ local function BuildContentFrame()
 
 	f.empty = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	f.empty:SetPoint("TOP", 0, -120)
-	f.empty:SetText("No consumables configured for this spec. Click |cffffffffSettings|r to add some.")
+	f.empty:SetText("No consumables picked yet. Click |cffffffffAdd...|r above to start.")
 	f.empty:Hide()
 
 	f.overflow = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
