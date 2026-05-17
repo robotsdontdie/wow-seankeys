@@ -186,7 +186,13 @@ end
 -- accidentally still worked because it was actually `timerType == 1`.
 -- ----------------------------------------------------------------------------
 
-local CHALLENGE_TIMER_TYPE = 1  -- LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE
+-- LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE. In modern retail Blizzard's
+-- enum is: NONE=0, BATTLEGROUND=1, CHALLENGE_MODE=2, PROVING_GROUND=3,
+-- EVENT=4. Earlier versions of this file used 1, which is the BG/PvP-race
+-- type — every GetWorldElapsedTime check failed and the timer never
+-- resolved, so the HUD showed 0:00 (or the par time, depending on path).
+-- Prefer Blizzard's global so a future enum shuffle doesn't bite us again.
+local CHALLENGE_TIMER_TYPE = _G.LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE or 2
 local activeTimerID
 
 -- Diagnostic throttle: we only log timer state every ~5s while we're in the
@@ -1008,7 +1014,18 @@ boot:SetScript("OnEvent", function(_, event, arg1)
 		securecallfunction(BuildFrame)
 		return
 	elseif event == "WORLD_STATE_TIMER_START" then
-		activeTimerID = arg1
+		-- This event fires for any world-state timer (BG races, proving
+		-- grounds, events). Verify it's a challenge-mode timer before
+		-- caching it as ours, or we'll trash a valid activeTimerID with
+		-- an unrelated one and the HUD timer will read 0.
+		if GetWorldElapsedTime then
+			local timerType = GetWorldElapsedTime(arg1)
+			if timerType == CHALLENGE_TIMER_TYPE then
+				activeTimerID = arg1
+			end
+		else
+			activeTimerID = arg1
+		end
 		return
 	elseif event == "WORLD_STATE_TIMER_STOP" then
 		if activeTimerID == arg1 then activeTimerID = nil end
