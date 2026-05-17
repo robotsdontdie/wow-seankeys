@@ -187,13 +187,19 @@ end
 -- ----------------------------------------------------------------------------
 
 -- LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE. In modern retail Blizzard's
--- enum is: NONE=0, BATTLEGROUND=1, CHALLENGE_MODE=2, PROVING_GROUND=3,
--- EVENT=4. Earlier versions of this file used 1, which is the BG/PvP-race
--- type — every GetWorldElapsedTime check failed and the timer never
--- resolved, so the HUD showed 0:00 (or the par time, depending on path).
--- Prefer Blizzard's global so a future enum shuffle doesn't bite us again.
+-- enum is documented as: NONE=0, BATTLEGROUND=1, CHALLENGE_MODE=2,
+-- PROVING_GROUND=3, EVENT=4. Earlier versions of this file used 1, which is
+-- the BG/PvP-race type — every GetWorldElapsedTime check failed and the
+-- timer never resolved. Prefer Blizzard's global so a future enum shuffle
+-- doesn't bite us again.
 local CHALLENGE_TIMER_TYPE = _G.LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE or 2
+Dbg(string.format("MPlusHud: CHALLENGE_TIMER_TYPE resolved to %d (LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE=%s, GetWorldElapsedTimers=%s, GetWorldElapsedTime=%s)",
+	CHALLENGE_TIMER_TYPE,
+	tostring(_G.LE_WORLD_ELAPSED_TIMER_TYPE_CHALLENGE_MODE),
+	tostring(GetWorldElapsedTimers and "yes" or "no"),
+	tostring(GetWorldElapsedTime and "yes" or "no")))
 local activeTimerID
+local lastResolvedLogElapsed   -- one-shot log when we first read a sane elapsed value
 
 -- Diagnostic throttle: we only log timer state every ~5s while we're in the
 -- "searching" branch (no usable activeTimerID), so the 0.5s ticker doesn't
@@ -202,7 +208,7 @@ local activeTimerID
 local lastTimerLogTime = 0
 
 local function FindActiveTimer()
-	local shouldLog = (GetTime() - lastTimerLogTime) > 5
+	local shouldLog = (GetTime() - lastTimerLogTime) > 2
 	if shouldLog then lastTimerLogTime = GetTime() end
 
 	if not GetWorldElapsedTimers then
@@ -212,16 +218,26 @@ local function FindActiveTimer()
 	-- GetWorldElapsedTimers returns active timer IDs as varargs.
 	local ids = { GetWorldElapsedTimers() }
 	if shouldLog then
-		Dbg(string.format("FindActiveTimer: GetWorldElapsedTimers() returned %d ids", #ids))
+		Dbg(string.format("FindActiveTimer: GetWorldElapsedTimers() returned %d ids (looking for type=%d)",
+			#ids, CHALLENGE_TIMER_TYPE))
 	end
 	for _, timerID in ipairs(ids) do
 		local timerType, elapsed = GetWorldElapsedTime(timerID)
 		if shouldLog then
-			Dbg(string.format("  id=%s type=%s elapsed=%s", tostring(timerID), tostring(timerType), tostring(elapsed)))
+			Dbg(string.format("  id=%s type=%s(%s) elapsed=%s(%s) match=%s",
+				tostring(timerID),
+				tostring(timerType), type(timerType),
+				tostring(elapsed), type(elapsed),
+				tostring(timerType == CHALLENGE_TIMER_TYPE)))
 		end
 		if timerType == CHALLENGE_TIMER_TYPE then
 			return timerID, elapsed
 		end
+	end
+	if shouldLog and #ids == 0 then
+		Dbg("FindActiveTimer: no active world-state timers at all")
+	elseif shouldLog then
+		Dbg("FindActiveTimer: no CHALLENGE_MODE timer among active ids")
 	end
 	return nil, 0
 end
@@ -231,17 +247,29 @@ local function GetElapsedSeconds()
 	if activeTimerID then
 		local timerType, elapsed = GetWorldElapsedTime(activeTimerID)
 		if timerType == CHALLENGE_TIMER_TYPE and elapsed and elapsed > 0 then
+			if not lastResolvedLogElapsed then
+				Dbg(string.format("GetElapsedSeconds: FIRST RESOLVE via cached id=%s type=%s elapsed=%s",
+					tostring(activeTimerID), tostring(timerType), tostring(elapsed)))
+				lastResolvedLogElapsed = elapsed
+			end
 			return elapsed
 		end
 		-- Cached ID exists but no longer returns a valid timer — log
 		-- once and fall through to re-discover via FindActiveTimer.
-		if (GetTime() - lastTimerLogTime) > 5 then
-			Dbg(string.format("GetElapsedSeconds: cached activeTimerID=%s now returns type=%s elapsed=%s",
-				tostring(activeTimerID), tostring(timerType), tostring(elapsed)))
+		if (GetTime() - lastTimerLogTime) > 2 then
+			Dbg(string.format("GetElapsedSeconds: cached activeTimerID=%s now returns type=%s elapsed=%s (expected type=%d)",
+				tostring(activeTimerID), tostring(timerType), tostring(elapsed), CHALLENGE_TIMER_TYPE))
 		end
 	end
 	local id, elapsed = FindActiveTimer()
-	if id then activeTimerID = id end
+	if id then
+		activeTimerID = id
+		if not lastResolvedLogElapsed then
+			Dbg(string.format("GetElapsedSeconds: FIRST RESOLVE via FindActiveTimer id=%s elapsed=%s",
+				tostring(id), tostring(elapsed)))
+			lastResolvedLogElapsed = elapsed or 0
+		end
+	end
 	return elapsed or 0
 end
 
@@ -1019,16 +1047,31 @@ boot:SetScript("OnEvent", function(_, event, arg1)
 		-- caching it as ours, or we'll trash a valid activeTimerID with
 		-- an unrelated one and the HUD timer will read 0.
 		if GetWorldElapsedTime then
-			local timerType = GetWorldElapsedTime(arg1)
-			if timerType == CHALLENGE_TIMER_TYPE then
+			local timerType, elapsed = GetWorldElapsedTime(arg1)
+			local accept = timerType == CHALLENGE_TIMER_TYPE
+			Dbg(string.format("WORLD_STATE_TIMER_START: id=%s type=%s(%s) elapsed=%s expected=%d accept=%s",
+				tostring(arg1),
+				tostring(timerType), type(timerType),
+				tostring(elapsed),
+				CHALLENGE_TIMER_TYPE, tostring(accept)))
+			if accept then
 				activeTimerID = arg1
+				lastResolvedLogElapsed = nil  -- arm the "first resolve" log for this run
 			end
 		else
+			Dbg(string.format("WORLD_STATE_TIMER_START: id=%s (GetWorldElapsedTime missing — caching unconditionally)",
+				tostring(arg1)))
 			activeTimerID = arg1
+			lastResolvedLogElapsed = nil
 		end
 		return
 	elseif event == "WORLD_STATE_TIMER_STOP" then
-		if activeTimerID == arg1 then activeTimerID = nil end
+		Dbg(string.format("WORLD_STATE_TIMER_STOP: id=%s our_cached=%s match=%s",
+			tostring(arg1), tostring(activeTimerID), tostring(activeTimerID == arg1)))
+		if activeTimerID == arg1 then
+			activeTimerID = nil
+			lastResolvedLogElapsed = nil
+		end
 		return
 	elseif event == "PLAYER_REGEN_DISABLED" then
 		RecordCombatStart()
