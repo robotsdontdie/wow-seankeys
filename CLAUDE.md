@@ -102,9 +102,11 @@ Note: `fullName` here is the canonical `"Name-NormalizedRealm"` form produced by
 
 ## Per-season data tables — UPDATE EACH SEASON
 
-Four places have season-specific data:
+Five places have season-specific data:
 
-1. **`TELEPORT_SPELL_BY_CHALLENGEMAP`** (in `SeanKeys.lua`) — `[challengeMapID] = spellID`. Used by the teleport buttons. Source: `Details\Libs\LibOpenRaid\ThingsToMantain_<Expansion>.lua` → `LIB_OPEN_RAID_MYTHIC_PLUS_TELEPORT_SPELLS`.
+1. **`TELEPORT_SPELL_BY_CHALLENGEMAP`** (in `SeanKeys.lua`) — `[challengeMapID] = spellID`. Used by the teleport buttons. Includes leftovers from recent seasons too so stale guildie keys still show a working teleport. Source: `Details\Libs\LibOpenRaid\ThingsToMantain_<Expansion>.lua` → `LIB_OPEN_RAID_MYTHIC_PLUS_TELEPORT_SPELLS`.
+
+   **`CURRENT_SEASON_DUNGEONS`** (in `SeanKeys.lua`) — flat list of challengeMapIDs for *only* the active season. Used by the loot window's dungeon switcher so the dropdown isn't polluted with last season's leftovers. Keep this in sync with the "Midnight Season 1" block of `TELEPORT_SPELL_BY_CHALLENGEMAP` when the season rotates.
 
 2. **`CHALLENGE_TO_INSTANCEMAP`** (in `LootWindow.lua`) — `[challengeMapID] = uiMapID` for journal lookup. Must match what `EJ_GetInstanceForMap` accepts. Source: `DBM-Core\modules\gui\Keystones.lua` → `teleportMap` (first element of each entry). For dungeons with "remix" variants (e.g. Magister's Terrace), use the *original* TBC-era uiMapID — that's what the journal indexes under.
 

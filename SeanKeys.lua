@@ -26,7 +26,9 @@ local LKS = LibStub("LibKeystone", true)
 local LSP = LibStub("LibSpecialization", true)
 
 -- Current-season + recent teleport spells. [challengeMapID] = spellID.
--- Exposed via ns so KeysWindow.lua's PopulateRow can read it.
+-- Exposed via ns so KeysWindow.lua's PopulateRow can read it. We deliberately
+-- keep TWW leftovers in here so a guildie's stale key still shows a working
+-- teleport icon — but the dungeon switcher uses CURRENT_SEASON_DUNGEONS below.
 ns.TELEPORT_SPELL_BY_CHALLENGEMAP = {
 	-- Midnight Season 1 (12.0.x)
 	[161] = 159898,  -- Skyreach
@@ -46,6 +48,10 @@ ns.TELEPORT_SPELL_BY_CHALLENGEMAP = {
 	[505] = 445417,  -- Ara-Kara, City of Echoes
 	[392] = 367416,  -- Tazavesh, the Veiled Market
 }
+
+-- The current-season pool used by the loot-window dungeon switcher. Keep this
+-- in sync with the "Midnight Season 1" block above as the season rotates.
+ns.CURRENT_SEASON_DUNGEONS = { 161, 239, 402, 556, 557, 558, 559, 560 }
 
 -- ----------------------------------------------------------------------------
 -- Slash commands

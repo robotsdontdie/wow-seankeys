@@ -774,11 +774,9 @@ ShowDungeonMenu = function(button)
 		return
 	end
 	local entries = {}
-	if ns.TELEPORT_SPELL_BY_CHALLENGEMAP then
-		for mapID in pairs(ns.TELEPORT_SPELL_BY_CHALLENGEMAP) do
-			local name = C_ChallengeMode and C_ChallengeMode.GetMapUIInfo and C_ChallengeMode.GetMapUIInfo(mapID)
-			if name then entries[#entries + 1] = { mapID = mapID, name = name } end
-		end
+	for _, mapID in ipairs(ns.CURRENT_SEASON_DUNGEONS or {}) do
+		local name = C_ChallengeMode and C_ChallengeMode.GetMapUIInfo and C_ChallengeMode.GetMapUIInfo(mapID)
+		if name then entries[#entries + 1] = { mapID = mapID, name = name } end
 	end
 	table.sort(entries, function(a, b) return a.name < b.name end)
 	MenuUtil.CreateContextMenu(button, function(owner, root)
