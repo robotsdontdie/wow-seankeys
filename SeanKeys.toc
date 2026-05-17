@@ -17,4 +17,5 @@ Wishlist.lua
 LootWindow.lua
 KeysWindow.lua
 MythicPlusHud.lua
+OptionsWindow.lua
 SeanKeys.lua

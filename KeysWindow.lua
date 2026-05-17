@@ -419,9 +419,15 @@ local function BuildFrame()
 	refresh:SetText("Refresh")
 	refresh:SetScript("OnClick", function() ns.Refresh(true) end)
 
+	local optionsBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	optionsBtn:SetSize(70, 20)
+	optionsBtn:SetPoint("RIGHT", refresh, "LEFT", -4, 0)
+	optionsBtn:SetText("Options")
+	optionsBtn:SetScript("OnClick", function() if ns.ToggleOptions then ns.ToggleOptions() end end)
+
 	local debugBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	debugBtn:SetSize(60, 20)
-	debugBtn:SetPoint("RIGHT", refresh, "LEFT", -4, 0)
+	debugBtn:SetPoint("RIGHT", optionsBtn, "LEFT", -4, 0)
 	debugBtn:SetText("Debug")
 	debugBtn:SetScript("OnClick", function() ns.ShowDebugWindow() end)
 	f.debugBtn = debugBtn

@@ -18,6 +18,7 @@ The WoW AddOn folder **`D:\Blizzard\World of Warcraft\_retail_\Interface\AddOns\
 8. **Per-character wishlist** — click the gold star on any gear row to mark it. A small star appears in the main list next to any dungeon whose wishlisted items might drop (suppressed for the alts section since you can't run those keys on your current character).
 9. **MDT integration** — right-click a dungeon name to open MDT to that dungeon (if installed).
 10. **Click name to copy Raider.IO URL** to clipboard (via popup, since `CopyToClipboard` is protected).
+11. **Options menu** — an "Options" button bottom-right of the main window opens a small panel. One toggle today: "Listen for ESC to close windows" (default on). Provides an opt-out for users hitting taint problems from our `UISpecialFrames` registration. Requires `/reload` to take effect because we only consult the setting at container build time.
 
 ## The "three protocols" problem
 
@@ -46,6 +47,7 @@ SeanKeys/
   Wishlist.lua                            -- per-character wishlist module
   LootWindow.lua                          -- left-click loot preview window
   KeysWindow.lua                          -- main aggregated keys window
+  OptionsWindow.lua                       -- per-account options panel
   SeanKeys.lua                            -- slim entry: events, slash, season data
   Libs/
     LibStub/LibStub.lua                   -- standard public-domain stub
@@ -63,7 +65,8 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - **`Data.lua`** — owns `keys`, `selfDungeonBest`, `guildMembers` (exposed on `ns` for cross-file reads). `UpsertKey`/`UpsertSpec` mutate the in-memory store *and* call `PersistEntry` which caches the entry into `ns.db.cache` when the player is in `ns.db.myCharacters` (cat = "self") or in `guildMembers` (cat = "guild"). Protocol subscriptions (LKS callback, LSP group + guild callbacks, LibOpenRaid lazy bind, AstralKeys SV scan) and `PullSelf` live here.
 - **`Wishlist.lua`** — backed by `SeanKeysCharDB.wishlist[itemID] = { challengeMapID, name }`. Maintains an O(1) `mapHasWishlist[mapID] = count` derived index, rebuilt on `Init` and on every `Toggle`. Public API: `ns.Wishlist.IsWishlisted`, `Toggle`, `HasItemForDungeon`, `Init`.
 - **`LootWindow.lua`** — `CHALLENGE_TO_INSTANCEMAP` season table, EJ resolver (`GetJournalInstance` with 3 fallback paths), `GatherLoot`, `IsGearItem`, `BuildLootFrame`, `ns.ShowLootFor`. Owns the loot frame, gear rows, "other" icon grid, the wishlist star UI, the class/spec selector dropdown, and the dungeon selector dropdown. Holds module-level `active{MapID,KeyLevel,JournalID,ClassID,SpecID}` state; `ShowLootFor` resets these to player defaults each call, `RenderLoot` re-fetches loot from the journal using the current state, `ShowSpecMenu` opens a `MenuUtil` context menu that mutates spec state and calls `RenderLoot` to refresh in place, and `ShowDungeonMenu` → `SwitchToDungeon` does the same for dungeon state (re-resolving `activeJournalID` and refreshing title/portrait, but preserving spec and key level). `UpdateSpecSelectorText` / `UpdateDungeonSelectorText` keep the two subtitles in sync with active state.
-- **`KeysWindow.lua`** — main aggregated window. Owns `mainFrame`, rows, separators, the dynamic section-based layout in `ns.Refresh`, `PopulateRow`, `Toggle`, and the MDT integration (`TryOpenMDT`, `MDT_DungeonIdxFor`, `NormalizeDungeonName`). Custom font `SeanKeysLevelFont` (Skurri 16pt THICKOUTLINE) is created here.
+- **`KeysWindow.lua`** — main aggregated window. Owns `mainFrame`, rows, separators, the dynamic section-based layout in `ns.Refresh`, `PopulateRow`, `Toggle`, and the MDT integration (`TryOpenMDT`, `MDT_DungeonIdxFor`, `NormalizeDungeonName`). Custom font `SeanKeysLevelFont` (Skurri 16pt THICKOUTLINE) is created here. Hosts the bottom-right button cluster `[Debug] [Options] [Refresh]`.
+- **`OptionsWindow.lua`** — per-account options panel. `ns.BuildOptionsFrame` builds an anonymous `PortraitFrameTemplate` child of the container at level 2300 with a single `UICheckButtonTemplate` bound to `ns.db.options.listenForEsc`. `ns.ToggleOptions` is the show/hide entry. Toggling the checkbox writes the saved var immediately; the change only takes effect on `/reload` because `Core.lua`'s `GetContainer` only reads `listenForEsc` at container build time.
 - **`SeanKeys.lua`** — entry point. Holds `TELEPORT_SPELL_BY_CHALLENGEMAP` (season-specific), slash commands, `UpdateDebugButtonVisibility`, and the boot frame with all event registrations.
 
 ## Slash commands
@@ -80,6 +83,7 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - `framePos = { relativePoint, x, y }` — main frame position
 - `frameHeight` — saved height (resize grip drag)
 - `showDebugButton` — `boolean`, defaults `false`
+- `options.listenForEsc` — `boolean`, defaults `true`. Whether to register our container in `UISpecialFrames` (the ESC-routing global). Set false to opt out of ESC-closes-windows behavior if it causes taint problems. `/reload` required.
 - `myCharacters[fullName] = { class, lastSeen }` — every character on this account that's logged in; used to identify the "alts" section and to flag self for caching
 - `cache[fullName] = { level, mapID, rating, class, specID, role, source, lastSeen, category }` — persistent keystone cache for self + guildies
 

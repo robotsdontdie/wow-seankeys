@@ -82,7 +82,13 @@ local function GetContainer()
 	container = CreateFrame("Frame", "SeanKeysContainer", UIParent)
 	container:SetAllPoints(UIParent)
 	container:Hide()
-	tinsert(UISpecialFrames, "SeanKeysContainer")
+	-- Honor the listen-for-ESC opt-out from OptionsWindow.lua. Default on
+	-- (and treat missing settings as on, which covers the pre-ADDON_LOADED
+	-- window). Toggling this requires /reload because we only consult it
+	-- here, at container build time.
+	if not ns.db or not ns.db.options or ns.db.options.listenForEsc ~= false then
+		tinsert(UISpecialFrames, "SeanKeysContainer")
+	end
 	container:SetScript("OnHide", function()
 		for _, win in ipairs(registeredWindows) do
 			if win and win:IsShown() then win:Hide() end

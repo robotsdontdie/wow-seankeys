@@ -130,6 +130,8 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			SeanKeysCharDB = SeanKeysCharDB or {}
 			ns.charDb = SeanKeysCharDB
 			if ns.db.showDebugButton == nil then ns.db.showDebugButton = false end
+			if ns.db.options == nil then ns.db.options = {} end
+			if ns.db.options.listenForEsc == nil then ns.db.options.listenForEsc = true end
 			if ns.Wishlist and ns.Wishlist.Init then ns.Wishlist.Init() end
 		end
 	elseif event == "PLAYER_LOGIN" then
@@ -161,6 +163,7 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 		if ns.BuildKeysFrame  then securecallfunction(ns.BuildKeysFrame)  end
 		if ns.BuildLootFrame  then securecallfunction(ns.BuildLootFrame)  end
 		if ns.BuildDebugWindow then securecallfunction(ns.BuildDebugWindow) end
+		if ns.BuildOptionsFrame then securecallfunction(ns.BuildOptionsFrame) end
 		if IsInGuild() then
 			if C_GuildInfo and C_GuildInfo.GuildRoster then
 				securecallfunction(C_GuildInfo.GuildRoster)
