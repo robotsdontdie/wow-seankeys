@@ -138,6 +138,7 @@ boot:SetScript("OnEvent", function(self, event, arg1)
 			if ns.db.options == nil then ns.db.options = {} end
 			if ns.db.options.listenForEsc == nil then ns.db.options.listenForEsc = true end
 			if ns.Wishlist and ns.Wishlist.Init then ns.Wishlist.Init() end
+			if ns.RunHistory and ns.RunHistory.Init then ns.RunHistory.Init() end
 		end
 	elseif event == "PLAYER_LOGIN" then
 		-- PLAYER_LOGIN runs a long synchronous chain. If ANY step taints

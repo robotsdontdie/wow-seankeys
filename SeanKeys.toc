@@ -18,5 +18,6 @@ Wishlist.lua
 LootWindow.lua
 KeysWindow.lua
 MythicPlusHud.lua
+RunHistory.lua
 ConsumableShopping.lua
 SeanKeys.lua

@@ -375,7 +375,12 @@ end
 -- ConfirmCommoditiesPurchase. We track the active purchase here.
 -- ----------------------------------------------------------------------------
 
-local pendingBuy   -- { itemID, qty }
+local pendingBuy   -- { itemID, qty } — the in-flight Confirm step
+-- Optimistic in-flight tracker: set the moment the user clicks Buy, kept until
+-- bags reflect the new items (or the purchase fails). PopulateRow inflates
+-- the displayed bag count and disables the button while this is set, so a
+-- distracted double-click can't fire a second purchase before the first lands.
+local inFlightBuy  -- { itemID, qty, preBuyHave }
 
 local function StartBuy(itemID, qty)
 	Dbg(string.format("StartBuy: itemID=%s qty=%s inCombat=%s",
@@ -475,7 +480,15 @@ local function PopulateRow(row, item)
 	row.name:SetText(name or string.format("Item %d", item.itemID))
 	row.category:SetText(item.label)
 
-	local have = GetBagCount(item.itemID)
+	local actualHave = GetBagCount(item.itemID)
+	-- Optimistic display: while a Buy for this itemID is in flight, show the
+	-- expected post-purchase count (preBuyHave + qty) until the actual bags
+	-- catch up. Using `max` so we never DECREASE the count if bags happen to
+	-- have updated faster than we cleared the in-flight tracker.
+	local have = actualHave
+	if inFlightBuy and inFlightBuy.itemID == item.itemID then
+		have = math.max(actualHave, inFlightBuy.preBuyHave + inFlightBuy.qty)
+	end
 	local target = (item.entry.target) or 0
 	local deficit = math.max(0, target - have)
 	-- Bag count color: red at 0, yellow when we have any. The cost cell
@@ -504,8 +517,15 @@ local function PopulateRow(row, item)
 		local total = cache.perUnit * deficit
 		row.cost:SetText(string.format("%s |cff888888(%s ea)|r",
 			FormatCoin(total), FormatCoin(cache.perUnit)))
-		row.buyBtn:SetText(string.format("Buy %d", deficit))
-		row.buyBtn:SetEnabled(not InCombatLockdown())
+		-- Lock the button while any Buy is in flight so a distracted
+		-- double-click can't fire a second purchase before the first lands.
+		local locked = inFlightBuy ~= nil
+		if locked then
+			row.buyBtn:SetText("...")
+		else
+			row.buyBtn:SetText(string.format("Buy %d", deficit))
+		end
+		row.buyBtn:SetEnabled(not locked and not InCombatLockdown())
 		row.buyBtn.qty = deficit
 		row.buyBtn:Show()
 	else
@@ -659,6 +679,29 @@ local function CreateRow(parent, idx)
 			Dbg("  -> missing itemID or qty, bailing")
 			return
 		end
+		if inFlightBuy then
+			Dbg("  -> another purchase already in flight, ignoring")
+			return
+		end
+		-- Mirror StartBuy's pre-checks here so we don't set inFlightBuy
+		-- (and lock the button) for a Buy that's going to bail.
+		if InCombatLockdown() then
+			Dbg("  -> in combat, bailing")
+			return
+		end
+		if not C_AuctionHouse or not C_AuctionHouse.StartCommoditiesPurchase then
+			Dbg("  -> C_AuctionHouse.StartCommoditiesPurchase missing, bailing")
+			return
+		end
+		-- Capture the pre-buy bag count BEFORE StartBuy fires, so the
+		-- optimistic display has a stable baseline even if a stray
+		-- BAG_UPDATE_DELAYED arrives between click and price-confirm.
+		inFlightBuy = {
+			itemID = row.itemID,
+			qty = self.qty,
+			preBuyHave = GetBagCount(row.itemID),
+		}
+		if ns.ConsumablesRefreshRows then ns.ConsumablesRefreshRows() end
 		StartBuy(row.itemID, self.qty)
 	end)
 
@@ -971,6 +1014,7 @@ ev:SetScript("OnEvent", function(self, event, a, b)
 		searching = false
 		activeSearchItemID = nil
 		pendingBuy = nil
+		inFlightBuy = nil
 	elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
 		OnCommodityResults(a)
 	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
@@ -982,13 +1026,30 @@ ev:SetScript("OnEvent", function(self, event, a, b)
 	elseif event == "COMMODITY_PRICE_UNAVAILABLE" then
 		Dbg(string.format("COMMODITY_PRICE_UNAVAILABLE: itemID=%s", tostring(a)))
 		pendingBuy = nil
+		inFlightBuy = nil
+		if contentFrame and contentFrame:IsShown() then RefreshRows() end
 	elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
 		Dbg("COMMODITY_PURCHASE_SUCCEEDED")
 		pendingBuy = nil
+		-- Don't clear inFlightBuy yet — wait for BAG_UPDATE_DELAYED so the
+		-- displayed count transitions directly from optimistic to actual
+		-- without a brief dip back to the pre-buy value.
 	elseif event == "COMMODITY_PURCHASE_FAILED" then
 		Dbg("COMMODITY_PURCHASE_FAILED")
 		pendingBuy = nil
+		inFlightBuy = nil
+		if contentFrame and contentFrame:IsShown() then RefreshRows() end
 	elseif event == "BAG_UPDATE_DELAYED" then
+		-- If bags reflect the expected post-purchase count, retire the
+		-- optimistic tracker so the actual count drives the display from now
+		-- on. Otherwise leave it (a stray bag update from looting / vendor
+		-- shouldn't prematurely revert our optimistic boost).
+		if inFlightBuy then
+			local currentHave = GetBagCount(inFlightBuy.itemID)
+			if currentHave >= inFlightBuy.preBuyHave + inFlightBuy.qty then
+				inFlightBuy = nil
+			end
+		end
 		if contentFrame and contentFrame:IsShown() then RefreshRows() end
 	end
 end)

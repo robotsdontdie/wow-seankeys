@@ -418,6 +418,19 @@ local function BuildFrame()
 	f.debugBtn = debugBtn
 	if not ns.db.showDebugButton then debugBtn:Hide() end
 
+	-- History button on the bottom-left, opening the run-history viewer
+	-- (RunHistory.lua). Anchored to the inset's left edge to mirror the
+	-- Refresh button's right-edge offset. ns.ShowRunHistory is exposed by
+	-- RunHistory.lua at file-load time, so the click handler resolves it
+	-- lazily — load order between KeysWindow and RunHistory doesn't matter.
+	local history = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	history:SetSize(80, 20)
+	history:SetPoint("BOTTOMLEFT", 24, 4)
+	history:SetText("History")
+	history:SetScript("OnClick", function()
+		if ns.ShowRunHistory then ns.ShowRunHistory() end
+	end)
+
 	-- Re-render row visibility live as the user drags the grip.
 	f:SetScript("OnSizeChanged", function()
 		if mainFrame and mainFrame:IsShown() then ns.Refresh() end

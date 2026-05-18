@@ -344,13 +344,25 @@ local function GetCombats()
 	return combats
 end
 
+-- Forward decl so RecordCombatEnd (below) can flush a death-state poll
+-- before deciding whether to keep this combat. The actual assignment is in
+-- the death-tracking section further down.
+local ScanForDeaths
+
+-- API quirk recap (also see Render comments): `forcesQuantity` is a 0..100
+-- percentage, NOT a mob count. The mob count comes from `forcesTotal`. So
+-- per-combat "mobs killed" = (endPct - startPct) * forcesTotal / 100. We
+-- store the resulting count + the live `forcesTotal` so the history view
+-- can recompute percentages even after the criterion stops reporting
+-- post-completion (which leaves crit.forcesTotal = 0 at finalize time).
 local function RecordCombatStart()
 	if not GetActiveRun() then return end
 	local crit = ReadCriteria()
 	combatStart = {
-		elapsed = GetElapsedSeconds(),
-		forces  = (crit and crit.forcesQuantity) or 0,
-		bosses  = (crit and crit.bossesDone) or 0,
+		elapsed     = GetElapsedSeconds(),
+		forcesPct   = (crit and crit.forcesQuantity) or 0,
+		forcesTotal = (crit and crit.forcesTotal) or 0,
+		bosses      = (crit and crit.bossesDone) or 0,
 	}
 	inCombat = true
 end
@@ -358,17 +370,44 @@ end
 local function RecordCombatEnd()
 	if not inCombat or not combatStart then return end
 	inCombat = false
+	-- Flush a death-state poll BEFORE deciding whether to keep the combat.
+	-- The ticker only polls every 0.5s, and a wipe death can land in the
+	-- gap between the last poll and now — without this flush, the death
+	-- wouldn't be in `deaths[]` yet and the hadDeath check below would
+	-- false-negative, dropping the combat (and orphaning the death).
+	if ScanForDeaths then ScanForDeaths() end
 	local crit = ReadCriteria()
-	local endForces = (crit and crit.forcesQuantity) or 0
+	local endPct    = (crit and crit.forcesQuantity) or 0
 	local endBosses = (crit and crit.bossesDone) or 0
+	-- Prefer the post-combat totalQuantity if the API still reports it
+	-- (means we're still mid-run). Falls back to the snapshotted value
+	-- from combat start, which we'd have grabbed before any criterion drop.
+	local forcesTotal = (crit and crit.forcesTotal) or combatStart.forcesTotal or 0
+	local pctDelta = math.max(0, endPct - combatStart.forcesPct)
+	local countDelta = (forcesTotal > 0) and math.floor(forcesTotal * pctDelta / 100 + 0.5) or 0
 	local entry = {
 		startElapsed = combatStart.elapsed,
 		duration     = GetElapsedSeconds() - combatStart.elapsed,
-		forcesKilled = math.max(0, endForces - combatStart.forces),
+		forcesKilled = countDelta,
+		forcesTotal  = forcesTotal,
 		boss         = endBosses > combatStart.bosses,
 	}
 	combatStart = nil
-	if entry.forcesKilled > 0 or entry.boss then
+	-- Keep combats with any noteworthy event. Wipes typically have
+	-- forcesKilled=0 and boss=false but ARE worth recording so the
+	-- per-combat death tooltip in the HUD panel and the history detail
+	-- view can attribute each death to a real combat row. Without this
+	-- last clause, a 5-person wipe between bosses gets silently dropped
+	-- and its deaths only surface in the run-wide DEATHS subsection.
+	local hadDeath = false
+	for _, d in ipairs(deaths) do
+		if d.elapsed and d.elapsed >= entry.startElapsed
+		   and d.elapsed <= entry.startElapsed + entry.duration then
+			hadDeath = true
+			break
+		end
+	end
+	if entry.forcesKilled > 0 or entry.boss or hadDeath then
 		table.insert(combats, entry)
 	end
 end
@@ -377,6 +416,328 @@ local function ResetCombats()
 	wipe(combats)
 	inCombat = false
 	combatStart = nil
+end
+
+-- ----------------------------------------------------------------------------
+-- Death tracking
+--
+-- Midnight (12.0) removed COMBAT_LOG_EVENT_UNFILTERED for addons, so the
+-- usual UNIT_DIED-subevent path is unavailable. Instead we poll the party's
+-- dead-or-ghost state on the existing 0.5s HUD ticker and record edges
+-- (alive -> dead) ourselves. `UnitIsDeadOrGhost`, `UnitName`, `UnitClass`,
+-- and `UnitGUID` return booleans/strings — none of those are Secret Values,
+-- so the polling path stays valid in M+ instances where numeric reads
+-- (health, damage) are concealed.
+--
+-- Per-combat attribution is derived (not stored) — `DeathsInCombat(combat)`
+-- walks `deaths` and matches by elapsed-time window. That keeps the death
+-- list canonical (no double-bookkeeping) and means the per-combat indicator
+-- in the panel and the per-combat indicator in saved history use the same
+-- math without us having to update two structures on each death.
+-- ----------------------------------------------------------------------------
+
+local deaths = {}
+local lastDeadStateByGUID = {}  -- guid -> true (dead at last poll) | nil/false (alive)
+
+-- Pre-canned sample deaths for /sk hudtest so the panel preview shows the
+-- death cells populated alongside the synthetic combats.
+local TEST_DEATHS = {
+	{ name = "Tankenstein",  class = "WARRIOR", elapsed = 124 },
+	{ name = "Spellslinger", class = "MAGE",    elapsed = 138 },
+	{ name = "Spellslinger", class = "MAGE",    elapsed = 211 },
+}
+
+local function GetDeaths()
+	if testMode then return TEST_DEATHS end
+	return deaths
+end
+
+-- Counts how many deaths fell within the combat's elapsed-time window
+-- [startElapsed, startElapsed + duration]. Used by both the HUD's expanded
+-- panel and the run-history detail view so the attribution is consistent.
+local function DeathsInCombat(combat)
+	if not combat then return 0 end
+	local ds = GetDeaths()
+	local startE = combat.startElapsed or 0
+	local endE   = startE + (combat.duration or 0)
+	local n = 0
+	for _, d in ipairs(ds) do
+		if d.elapsed >= startE and d.elapsed <= endE then n = n + 1 end
+	end
+	return n
+end
+
+local function ResetDeaths()
+	wipe(deaths)
+	wipe(lastDeadStateByGUID)
+	-- Seed the per-unit state map with current dead/alive status so the first
+	-- post-reset ScanForDeaths doesn't false-positive on units that were
+	-- already dead at reset time (e.g. after a CHALLENGE_MODE_RESET fired
+	-- while bodies were still on the floor).
+	for i = 0, 4 do
+		local unit = (i == 0) and "player" or ("party" .. i)
+		if UnitExists(unit) then
+			local guid = UnitGUID(unit)
+			if guid then
+				lastDeadStateByGUID[guid] = UnitIsDeadOrGhost(unit) and true or false
+			end
+		end
+	end
+end
+
+-- Tooltip helpers shared by the HUD's deaths section icon (aggregate
+-- count-by-name) and each combat row's per-combat death cell (chronological
+-- name + MM:SS within the combat's elapsed-time window). Both anchored
+-- ANCHOR_RIGHT so the tooltip floats out beside the icon without covering
+-- the HUD or expanded panel content.
+--
+-- Defined ahead of BuildFrame / BuildPanel so the OnEnter closures attached
+-- during construction can capture these locals.
+
+local function ShowHudDeathsTooltip(anchor)
+	GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT")
+	GameTooltip:AddLine("Deaths", 1, 0.82, 0)
+	local ds = GetDeaths()
+	if #ds == 0 then
+		GameTooltip:AddLine("(no deaths yet)", 0.7, 0.7, 0.7)
+		GameTooltip:Show()
+		return
+	end
+	-- Aggregate by player name, preserving first-appearance order so the
+	-- list reads chronologically by who-first-died rather than alphabetically.
+	local groups, order = {}, {}
+	for _, d in ipairs(ds) do
+		local g = groups[d.name]
+		if not g then
+			g = { count = 0, class = d.class }
+			groups[d.name] = g
+			order[#order + 1] = d.name
+		end
+		g.count = g.count + 1
+	end
+	for _, name in ipairs(order) do
+		local g = groups[name]
+		local r, gg, b = ns.GetClassColor(g.class)
+		GameTooltip:AddDoubleLine(name, tostring(g.count), r, gg, b, 1, 1, 1)
+	end
+	GameTooltip:Show()
+end
+
+-- Inline MM:SS formatter — duplicated from FormatMMSS further down so this
+-- tooltip helper can be declared above BuildPanel without forward-decl gymnastics.
+local function FormatStamp(s)
+	if not s or s < 0 then s = 0 end
+	s = math.floor(s + 0.5)
+	return string.format("%d:%02d", math.floor(s / 60), s % 60)
+end
+
+local function ShowCombatDeathsTooltip(anchor, combat, combatIdx)
+	if not combat then return end
+	GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT")
+	GameTooltip:AddLine(string.format("Deaths in Combat %d", combatIdx or 0), 1, 0.82, 0)
+	local ds = GetDeaths()
+	local startE = combat.startElapsed or 0
+	local endE   = startE + (combat.duration or 0)
+	local any = false
+	for _, d in ipairs(ds) do
+		if d.elapsed and d.elapsed >= startE and d.elapsed <= endE then
+			local r, g, b = ns.GetClassColor(d.class)
+			GameTooltip:AddDoubleLine(d.name or "?", FormatStamp(d.elapsed), r, g, b, 1, 1, 1)
+			any = true
+		end
+	end
+	if not any then GameTooltip:AddLine("(no deaths)", 0.7, 0.7, 0.7) end
+	GameTooltip:Show()
+end
+
+-- Polled from the ticker. Walks player + party1..4, looks for any unit whose
+-- dead-or-ghost state flipped from false to true since the previous poll,
+-- and records a death entry with the current elapsed seconds. Resurrection
+-- (dead -> alive) is also tracked so a battle-rezzed player who dies again
+-- gets a second entry. We ignore deaths until the run is active so a wipe
+-- in the pre-key staging area doesn't seed the list.
+--
+-- Assigned (not declared) so the forward-decl `local ScanForDeaths` upvalue
+-- near the top of the file binds, letting RecordCombatEnd reach it without
+-- caring about file ordering.
+ScanForDeaths = function()
+	if not GetActiveRun() then return end
+	if testMode then return end
+	for i = 0, 4 do
+		local unit = (i == 0) and "player" or ("party" .. i)
+		if UnitExists(unit) then
+			local guid = UnitGUID(unit)
+			if guid then
+				local nowDead = UnitIsDeadOrGhost(unit) and true or false
+				local wasDead = lastDeadStateByGUID[guid] and true or false
+				if nowDead and not wasDead then
+					local rawName = UnitName(unit) or "?"
+					local short = Ambiguate and Ambiguate(rawName, "none") or rawName
+					local _, class = UnitClass(unit)
+					deaths[#deaths + 1] = {
+						name    = short,
+						class   = class,
+						elapsed = GetElapsedSeconds() or 0,
+					}
+					Dbg(string.format("ScanForDeaths: %s (%s) died at %ds (total %d)",
+						short, tostring(class), math.floor(GetElapsedSeconds() or 0), #deaths))
+				end
+				lastDeadStateByGUID[guid] = nowDead
+			end
+		end
+	end
+end
+
+-- ----------------------------------------------------------------------------
+-- Run lifecycle for history persistence
+--
+-- `currentRun` is the in-flight metadata for a run we'll save to history once
+-- it ends. We build it lazily so login/reload mid-key still captures the
+-- remainder of the run (start epoch is back-calculated from elapsed). We
+-- finalize on three signals:
+--   * CHALLENGE_MODE_COMPLETED  -> completed (with onTime + upgradeLevels)
+--   * CHALLENGE_MODE_RESET      -> abandoned (key reset / left)
+--   * Ticker detects no active run while currentRun is set -> abandoned
+--     (covers the zone-out / log-out-then-resume cases)
+--
+-- Test-mode runs (/sk hudtest) are never recorded — we'd flood the saved-var
+-- list with synthetic data on every test toggle.
+-- ----------------------------------------------------------------------------
+
+local currentRun = nil
+
+local function EnsureCurrentRunMeta()
+	if currentRun then return end
+	if testMode then return end
+	local run = GetActiveRun()
+	if not run then return end
+	local elapsed = GetElapsedSeconds() or 0
+	currentRun = {
+		startEpoch = math.floor(time() - elapsed),
+		mapID      = run.mapID,
+		name       = run.name,
+		level      = run.level,
+		affixes    = {},
+		timeLimit  = run.timeLimit,
+	}
+	for i, id in ipairs(run.affixes or {}) do currentRun.affixes[i] = id end
+	Dbg(string.format("RunHistory: tracking new run mapID=%s +%d startEpoch=%d",
+		tostring(currentRun.mapID), currentRun.level, currentRun.startEpoch))
+end
+
+local function FinalizeCurrentRun(completed, completionInfo)
+	if not currentRun then return end
+	if testMode then currentRun = nil; return end
+
+	-- Flush any in-flight combat before snapshotting. CHALLENGE_MODE_COMPLETED
+	-- can fire before PLAYER_REGEN_ENABLED on the final-boss-kill chain — if
+	-- we skipped this, the boss combat would stay buffered in `combatStart`
+	-- and never make it into `combats[]`.
+	if inCombat and combatStart then
+		RecordCombatEnd()
+	end
+
+	local elapsed = GetElapsedSeconds() or 0
+	local crit = ReadCriteria()
+	-- crit.forcesTotal goes to 0 immediately on completion (the criterion
+	-- stops reporting), so prefer the last positive value we ever saw via
+	-- the per-combat snapshots. Walk combats[] for the max.
+	local liveForcesTotal = (crit and crit.forcesTotal) or 0
+	local cachedForcesTotal = 0
+	for _, c in ipairs(combats) do
+		if c.forcesTotal and c.forcesTotal > cachedForcesTotal then
+			cachedForcesTotal = c.forcesTotal
+		end
+	end
+	local forcesTotal = (liveForcesTotal > 0) and liveForcesTotal or cachedForcesTotal
+
+	-- Wall-clock duration as the last-resort fallback. The completion API
+	-- gives the authoritative ms-precision value when it's populated, but
+	-- it can return 0 at the very moment the event fires. The in-key elapsed
+	-- read is also unreliable at this point because WORLD_STATE_TIMER_STOP
+	-- often arrives in the same frame and zeroes our cached timer.
+	local wallClock = (currentRun.startEpoch and currentRun.startEpoch > 0)
+		and math.max(0, time() - currentRun.startEpoch) or 0
+
+	local bestDuration = 0
+	if completionInfo and completionInfo.time and completionInfo.time > 0 then
+		bestDuration = math.floor(completionInfo.time / 1000)
+	elseif elapsed > 0 then
+		bestDuration = math.floor(elapsed)
+	else
+		bestDuration = wallClock
+	end
+
+	local snap = {
+		startEpoch     = currentRun.startEpoch,
+		endEpoch       = time(),
+		duration       = bestDuration,
+		mapID          = currentRun.mapID,
+		name           = currentRun.name,
+		level          = currentRun.level,
+		affixes        = currentRun.affixes,
+		timeLimit      = currentRun.timeLimit,
+		forcesTotal    = forcesTotal,
+		completed      = completed and true or false,
+		onTime         = false,
+		upgradeLevels  = 0,
+		player         = ns.FullName and ns.FullName(ns.NormalizeName(UnitName("player"))) or UnitName("player"),
+		combats        = {},
+		deaths         = {},
+	}
+
+	-- Best-effort onTime + upgradeLevels.
+	--   * Trust the API's onTime when it says true.
+	--   * Otherwise derive from duration vs par — covers the case where the
+	--     completion API returned partial data and reported onTime=false on
+	--     a run we actually timed (saw this on a real Pit of Saron +11 that
+	--     finished at 21:28 of a 30:00 par).
+	if completed then
+		if completionInfo and completionInfo.onTime then
+			snap.onTime = true
+		elseif snap.timeLimit and snap.timeLimit > 0 and snap.duration > 0
+		   and snap.duration <= snap.timeLimit then
+			snap.onTime = true
+		end
+		if completionInfo and completionInfo.keystoneUpgradeLevels
+		   and completionInfo.keystoneUpgradeLevels > 0 then
+			snap.upgradeLevels = completionInfo.keystoneUpgradeLevels
+		elseif snap.onTime and snap.timeLimit and snap.timeLimit > 0 then
+			-- Derive the upgrade tier from the timer fraction: 60% par = +3,
+			-- 80% = +2, on-par = +1. Matches Blizzard's tier breakpoints.
+			local frac = snap.duration / snap.timeLimit
+			if     frac <= 0.60 then snap.upgradeLevels = 3
+			elseif frac <= 0.80 then snap.upgradeLevels = 2
+			else                     snap.upgradeLevels = 1
+			end
+		end
+	end
+
+	for i, c in ipairs(combats) do
+		snap.combats[i] = {
+			startElapsed = c.startElapsed,
+			duration     = c.duration,
+			forcesKilled = c.forcesKilled,
+			forcesTotal  = c.forcesTotal,  -- per-combat denominator for pct
+			boss         = c.boss and true or false,
+		}
+	end
+
+	for i, d in ipairs(deaths) do
+		snap.deaths[i] = {
+			name    = d.name,
+			class   = d.class,
+			elapsed = d.elapsed,
+		}
+	end
+
+	if ns.RunHistory and ns.RunHistory.Append then
+		ns.RunHistory.Append(snap)
+	end
+	Dbg(string.format("RunHistory: finalized completed=%s onTime=%s duration=%ds combats=%d deaths=%d",
+		tostring(snap.completed), tostring(snap.onTime), snap.duration, #snap.combats, #snap.deaths))
+
+	currentRun = nil
 end
 
 -- ----------------------------------------------------------------------------
@@ -408,7 +769,9 @@ local RenderPanel
 -- HUD slot order, left-to-right. Affixes were dropped from the HUD and
 -- moved into the expanded details panel; the SECTION_DEFS.affixes entry is
 -- kept only for its color value, which the panel reuses for its affix line.
-local SECTION_ORDER = { "dungeon", "bosses", "forces", "timer" }
+-- Deaths sits just before timer: forces/deaths read as the "what's been
+-- spent" pair (mob budget + raid losses) before the time-remaining anchor.
+local SECTION_ORDER = { "dungeon", "bosses", "forces", "deaths", "timer" }
 
 -- Per-section visual config.
 --   * `icon` is a static texture path. Sections with no `icon` and no
@@ -444,6 +807,15 @@ local SECTION_DEFS = {
 		color = { 0.85, 0.65, 1.00 }, -- light violet
 		crop  = false,
 	},
+	deaths = {
+		-- Reuses the boss skull but red-tinted via `iconVertex` so the deaths
+		-- counter reads as "bad skull" at a glance — distinct from the violet
+		-- bosses-remaining counter without needing a separate texture.
+		icon       = "Interface\\TARGETINGFRAME\\UI-TargetingFrame-Skull",
+		iconVertex = { 1.00, 0.35, 0.35, 1 },
+		color      = { 1.00, 0.40, 0.40 }, -- red
+		crop       = false,
+	},
 }
 
 -- Worst-case sample strings per HUD section. BuildFrame renders each into
@@ -455,6 +827,7 @@ local SECTION_SAMPLES = {
 	timer   = "59:59",           -- MM:SS (we clamp negatives to 0:00)
 	forces  = "999/999 (100%)",  -- full pull, "<remaining>/<total> (<pct>)"
 	bosses  = "9/9",             -- bosses-remaining/bosses-total
+	deaths  = "99",              -- two-digit cap; absurd-key territory but defensive
 }
 
 local SLOT_PADDING = 2  -- a couple px of safety added to each measurement
@@ -562,6 +935,10 @@ local function BuildFrame()
 			s.icon:SetSize(ICON_SIZE, ICON_SIZE)
 			if def.icon then s.icon:SetTexture(def.icon) end
 			if def.crop then s.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93) end
+			-- Optional tint (e.g. red for deaths, reusing the bosses skull).
+			if def.iconVertex then
+				s.icon:SetVertexColor(def.iconVertex[1], def.iconVertex[2], def.iconVertex[3], def.iconVertex[4] or 1)
+			end
 		end
 
 		s.text = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -577,6 +954,21 @@ local function BuildFrame()
 	-- Measure each section's worst-case sample to lock in a slot width.
 	for _, key in ipairs(SECTION_ORDER) do
 		MeasureSection(key, SECTION_SAMPLES[key] or "")
+	end
+
+	-- Hover area over the deaths section (icon + text slot) for the
+	-- aggregated death-count-by-name tooltip. Anchored relative to the
+	-- icon/text so it tracks the layout-pass positions in Render.
+	local dsec = f.sections.deaths
+	if dsec and dsec.icon and dsec.text then
+		dsec.hover = CreateFrame("Frame", nil, f)
+		dsec.hover:SetPoint("LEFT",   dsec.icon, "LEFT",   0, 0)
+		dsec.hover:SetPoint("RIGHT",  dsec.text, "RIGHT",  0, 0)
+		dsec.hover:SetPoint("TOP",    dsec.icon, "TOP",    0, 2)
+		dsec.hover:SetPoint("BOTTOM", dsec.icon, "BOTTOM", 0, -2)
+		dsec.hover:EnableMouse(true)
+		dsec.hover:SetScript("OnEnter", function(self) ShowHudDeathsTooltip(self) end)
+		dsec.hover:SetScript("OnLeave", function() GameTooltip:Hide() end)
 	end
 
 	f:Hide()
@@ -651,6 +1043,7 @@ local function Render()
 	f.sections.timer.text:SetText(timerStr)
 	f.sections.timer.text:SetTextColor(tr, tg, tb, 1)
 	f.sections.forces.text:SetText(forcesStr)
+	f.sections.deaths.text:SetText(tostring(#GetDeaths()))
 
 	-- Dungeon icon follows the active dungeon. Cached so we only hit
 	-- GetMapUIInfo and SetTexture when the map actually changes.
@@ -762,6 +1155,11 @@ local C_FORCES_PCT_W    = 40  -- "(100%)"
 local C_TIME_ICON_X     = 180
 local C_TIME_START_W    = 38  -- "MM:SS" (with slack)
 local C_TIME_DUR_W      = 50  -- "(MM:SS)" worst case
+-- Death cell anchored after the time cell; only shown when the combat had
+-- one or more deaths. ICON_X is past the end of the time-dur slot
+-- (180 + 11 icon + 3 + 38 + 3 + 50 = 285), plus a small visual gap.
+local C_DEATH_ICON_X    = 296
+local C_DEATH_COUNT_W   = 20  -- single- or two-digit count
 local C_ICON_GAP        = 3   -- icon -> primary value
 local C_PAREN_GAP       = 3   -- primary value -> parenthesized value
 local CELL_ICON_SIZE    = 11
@@ -854,6 +1252,39 @@ local function BuildPanel()
 		row.timeDurText:SetJustifyH("LEFT")
 		row.timeDurText:SetTextColor(1, 1, 1, 1)
 
+		-- Deaths cell: red-tinted skull + count. Both hidden when the combat
+		-- had zero deaths so untimed pulls don't get visual noise.
+		row.deathIcon = row:CreateTexture(nil, "OVERLAY")
+		row.deathIcon:SetTexture(COMBAT_SKULL_TEX)
+		row.deathIcon:SetVertexColor(1.00, 0.35, 0.35, 1)
+		row.deathIcon:SetSize(CELL_ICON_SIZE, CELL_ICON_SIZE)
+		row.deathIcon:SetPoint("LEFT", C_DEATH_ICON_X, 0)
+		row.deathIcon:Hide()
+
+		local dc = SECTION_DEFS.deaths.color
+		row.deathCountText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		row.deathCountText:SetPoint("LEFT", row.deathIcon, "RIGHT", C_ICON_GAP, 0)
+		row.deathCountText:SetWidth(C_DEATH_COUNT_W)
+		row.deathCountText:SetJustifyH("LEFT")
+		row.deathCountText:SetTextColor(dc[1], dc[2], dc[3], 1)
+		row.deathCountText:Hide()
+
+		-- Hover area covering the icon + count slot. RenderPanel stashes the
+		-- current combat + 1-based index on the row so the tooltip handler
+		-- can resolve the per-combat death list at hover time.
+		row.deathHover = CreateFrame("Frame", nil, row)
+		row.deathHover:SetPoint("LEFT",   row.deathIcon,       "LEFT",   0, 0)
+		row.deathHover:SetPoint("RIGHT",  row.deathCountText,  "RIGHT",  0, 0)
+		row.deathHover:SetPoint("TOP",    row.deathIcon,       "TOP",    0, 2)
+		row.deathHover:SetPoint("BOTTOM", row.deathIcon,       "BOTTOM", 0, -2)
+		row.deathHover:EnableMouse(true)
+		row.deathHover:SetScript("OnEnter", function(self)
+			local r = self:GetParent()
+			ShowCombatDeathsTooltip(self, r._combat, r._combatIdx)
+		end)
+		row.deathHover:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		row.deathHover:Hide()
+
 		row:Hide()
 		panel.combatRows[i] = row
 	end
@@ -927,12 +1358,15 @@ RenderPanel = function()
 
 		if c.boss then row.skull:Show() else row.skull:Hide() end
 
-		-- Forces: split into killed (right-aligned, fixed) + pct (left-aligned, fixed)
-		-- so the "(" lines up across rows. pct = killed / forcesTotal.
+		-- Forces: count is now a real mob delta (see RecordCombatEnd), and we
+		-- prefer the per-combat forcesTotal that was snapshotted at end of
+		-- combat so the percentage stays correct even if the live criterion
+		-- has since stopped reporting (e.g. just after key completion).
 		local killed = c.forcesKilled or 0
+		local total  = c.forcesTotal or forcesTotal or 0
 		row.forcesKilledText:SetText(tostring(killed))
-		if forcesTotal > 0 then
-			local pct = math.floor((killed / forcesTotal) * 100 + 0.5)
+		if total > 0 then
+			local pct = math.floor((killed / total) * 100 + 0.5)
 			row.forcesPctText:SetText(string.format("(%d%%)", pct))
 		else
 			row.forcesPctText:SetText("")
@@ -943,6 +1377,25 @@ RenderPanel = function()
 		local timeRemAtStart = math.max(0, tl - (c.startElapsed or 0))
 		row.timeStartText:SetText(FormatMMSS(timeRemAtStart))
 		row.timeDurText:SetText(string.format("(%s)", FormatMMSS(c.duration or 0)))
+
+		-- Deaths: only render when the combat had any. DeathsInCombat reads
+		-- from the live deaths array (or TEST_DEATHS under /sk hudtest), and
+		-- the elapsed-time-window match is the source of truth for both the
+		-- live panel and the saved history view. Stash the combat + index on
+		-- the row so the death-icon hover resolves the per-combat death list.
+		row._combat    = c
+		row._combatIdx = i
+		local nDeaths = DeathsInCombat(c)
+		if nDeaths > 0 then
+			row.deathCountText:SetText(tostring(nDeaths))
+			row.deathIcon:Show()
+			row.deathCountText:Show()
+			row.deathHover:Show()
+		else
+			row.deathIcon:Hide()
+			row.deathCountText:Hide()
+			row.deathHover:Hide()
+		end
 
 		row:Show()
 		y = y + PANEL_LINE
@@ -994,9 +1447,23 @@ local function StartTicker()
 	ticker = C_Timer.NewTicker(0.5, function()
 		if not GetActiveRun() then
 			StopTicker()
+			-- The run vanished without a CHALLENGE_MODE_COMPLETED event —
+			-- typically the player zoned out or otherwise abandoned. Persist
+			-- whatever we have so the history reflects the attempt. Same
+			-- securecallfunction isolation as Render (FinalizeCurrentRun
+			-- mutates ns.db, which the panel manager indirectly reads).
+			if currentRun then securecallfunction(FinalizeCurrentRun, false, nil) end
 			if f then f:Hide() end
 			return
 		end
+		-- Build run metadata on first observation. Covers logging in / reloading
+		-- mid-key: the START event won't fire again, so we never had a chance
+		-- to capture the run otherwise.
+		if not currentRun and not testMode then EnsureCurrentRunMeta() end
+		-- Poll party dead-or-ghost state for new deaths. CLEU is unavailable
+		-- to addons in Midnight (12.0), so this 0.5s edge-detect is our
+		-- substitute for UNIT_DIED. Cheap: 5 unit lookups per tick.
+		ScanForDeaths()
 		-- Strip our identity from the per-tick Render so the SetWidth /
 		-- SetHeight / Show / SetText / SetPoint mutations on the HUD frame
 		-- (a UIParent child) never carry SeanKeys taint into UIParent's
@@ -1102,8 +1569,33 @@ boot:SetScript("OnEvent", function(_, event, arg1)
 	elseif event == "PLAYER_REGEN_ENABLED" then
 		RecordCombatEnd()
 		-- Fall through so the HUD can hide when a key ends outside combat.
-	elseif event == "CHALLENGE_MODE_START" or event == "CHALLENGE_MODE_RESET" then
+	elseif event == "CHALLENGE_MODE_START" then
+		-- A new key just kicked off. If currentRun is somehow still set
+		-- (prior run never cleanly finalized), persist the orphan as
+		-- abandoned before clearing for the new attempt.
+		if currentRun then FinalizeCurrentRun(false, nil) end
 		ResetCombats()
+		ResetDeaths()
+		EnsureCurrentRunMeta()
+	elseif event == "CHALLENGE_MODE_RESET" then
+		if currentRun then FinalizeCurrentRun(false, nil) end
+		ResetCombats()
+		ResetDeaths()
+	elseif event == "CHALLENGE_MODE_COMPLETED" then
+		-- Completion API returns the canonical end state: timed/over-time and
+		-- the keystone upgrade tier. Pull it through to the history entry.
+		local info
+		if C_ChallengeMode and C_ChallengeMode.GetCompletionInfo then
+			local mapID, level, ctime, onTime, keystoneUpgradeLevels = C_ChallengeMode.GetCompletionInfo()
+			info = {
+				mapID                 = mapID,
+				level                 = level,
+				time                  = ctime,
+				onTime                = onTime,
+				keystoneUpgradeLevels = keystoneUpgradeLevels,
+			}
+		end
+		FinalizeCurrentRun(true, info)
 	end
 	Refresh()
 end)

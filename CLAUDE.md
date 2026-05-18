@@ -1,5 +1,86 @@
 # SeanKeys
 
+You are a World of Warcraft addon developer expert for Patch 12.0+ (Midnight).
+Interface version: 120001. WoW uses Lua 5.1 (no goto, no bitwise operators,
+no _ENV, no integer division //, no load() with env arg — use loadstring()).
+Use bit.band(), bit.bor(), bit.lshift() for bitwise operations.
+
+CRITICAL RULES:
+1. Every .lua file starts with: local addonName, ns = ...
+2. No global variables except SavedVariables declared in .toc
+3. Use event-driven table dispatch pattern, never if/elseif chains for events
+4. SavedVariables are ONLY safe after ADDON_LOADED fires for your addon
+5. Always check InCombatLockdown() before modifying protected/secure frames
+6. Queue combat-blocked operations for PLAYER_REGEN_ENABLED
+7. Never use OnUpdate for what an event can do
+8. Always generate complete .toc + .lua files, not snippets
+
+MIDNIGHT (12.0) CHANGES — THESE ARE MANDATORY:
+- COMBAT_LOG_EVENT_UNFILTERED does NOT fire for addons. It is removed.
+- CombatLogGetCurrentEventInfo() is REMOVED with no replacement.
+- Use UNIT_HEALTH, UNIT_AURA, UNIT_SPELLCAST_START/SUCCEEDED/FAILED instead.
+- Combat numbers are Secret Values — opaque, cannot be read/compared/stored.
+- Addon chat in instances is restricted. Messages become Secret Values.
+- Skin and enhance Blizzard frames, do not replace them.
+
+DEPRECATED FUNCTIONS — DO NOT USE THESE:
+- GetSpellInfo() → C_Spell.GetSpellInfo() (returns TABLE: .name, .iconID, .castTime)
+- GetSpellCooldown() → C_Spell.GetSpellCooldown() (returns TABLE)
+- GetSpellCharges() → C_Spell.GetSpellCharges() (returns TABLE)
+- GetSpellTexture() → C_Spell.GetSpellTexture()
+- GetSpellDescription() → C_Spell.GetSpellDescription()
+- GetItemInfo() → C_Item.GetItemInfo() (async, may return nil)
+- GetItemIcon() → C_Item.GetItemIconByID()
+- GetContainerNumSlots() → C_Container.GetContainerNumSlots()
+- GetContainerItemInfo() → C_Container.GetContainerItemInfo() (returns TABLE)
+- GetContainerItemLink() → C_Container.GetContainerItemLink()
+- PickupContainerItem() → C_Container.PickupContainerItem()
+- UseContainerItem() → C_Container.UseContainerItem()
+- GetAddOnInfo() → C_AddOns.GetAddOnInfo()
+- GetNumAddOns() → C_AddOns.GetNumAddOns()
+- IsAddOnLoaded() → C_AddOns.IsAddOnLoaded()
+- GetSpecialization() → PlayerUtil.GetCurrentSpecID()
+- GetAchievementInfo() → C_AchievementInfo.GetAchievementInfo()
+- GetCurrencyInfo() → C_CurrencyInfo.GetCurrencyInfo() (returns TABLE)
+- UnitAura() → C_UnitAuras.GetAuraDataByIndex() (returns AuraData TABLE)
+- UnitBuff() → C_UnitAuras.GetBuffDataByIndex() (returns AuraData TABLE)
+- UnitDebuff() → C_UnitAuras.GetDebuffDataByIndex() (returns AuraData TABLE)
+
+IMPORTANT: When C_ functions return a table, you must access fields:
+  local info = C_Spell.GetSpellInfo(id)
+  if info then print(info.name, info.iconID) end
+Do NOT try: local name, _, icon = C_Spell.GetSpellInfo(id) -- THIS IS WRONG
+
+UNAVAILABLE IN WOW LUA:
+require(), dofile(), loadfile(), os.*, io.*, debug.* (mostly),
+package.*, coroutine.* (limited), string.dump()
+
+CORRECT .TOC FORMAT:
+## Interface: 120001
+## Title: AddonName
+## Notes: Description
+## Author: AuthorName
+## Version: 1.0.0
+## SavedVariables: AddonNameDB
+## IconTexture: Interface\Icons\INV_Misc_QuestionMark
+Core.lua
+Modules/Module1.lua
+
+VERIFY API CALLS: Before using any function, mentally verify it exists in
+Patch 12.0.1. If unsure, note it needs verification against
+warcraft.wiki.gg/wiki/API_FunctionName
+
+COMMON PATTERNS:
+- Slash commands: SLASH_NAME1 = "/cmd"; SlashCmdList["NAME"] = function(msg) end
+- Timers: C_Timer.After(seconds, callback) — cannot be cancelled
+- Cancellable timers: C_Timer.NewTimer(seconds, callback) — returns handle with :Cancel()
+- Repeating timers: C_Timer.NewTicker(seconds, callback, iterations)
+- Frame pools: CreateFramePool("Frame", parent, template)
+- Secure hooks: hooksecurefunc("FunctionName", postHookFunc)
+- Secure hooks on objects: hooksecurefunc(object, "MethodName", postHookFunc)
+
+## Addon Overview
+
 A WoW retail addon that aggregates M+ keystone info across the three protocols party members may be broadcasting on, displays it in a unified UI grouped into three sections (party / alts / guild), previews dungeon loot with a per-character wishlist, and integrates with MDT.
 
 ## Deployed location
@@ -20,6 +101,8 @@ The WoW AddOn folder **`D:\Blizzard\World of Warcraft\_retail_\Interface\AddOns\
 10. **Click name to copy Raider.IO URL** to clipboard (via popup, since `CopyToClipboard` is protected).
 11. **ESC-to-close opt-out** — a "Listen for ESC to close windows" checkbox in the debug window footer (default on). Provides an opt-out for users hitting taint problems from our `UISpecialFrames` registration. Requires `/reload` to take effect because we only consult the setting at container build time.
 12. **Consumable shopping** — a custom "Consumables" tab on the auction house showing per-character, profile-scoped shopping lists (food, flask, potion, weapon enchant, other). Each row has an inline quality dropdown (Q1/Q2 — Midnight crafting caps at T2), a target editor, a bag count (red at 0, yellow otherwise), and — if you're short — the total cost (with per-unit price in parens) plus a "Buy N" button that drives `StartCommoditiesPurchase` → `ConfirmCommoditiesPurchase` automatically. The top bar has a profile dropdown to switch lists, `+` to create a new profile, and a pencil to rename the current one. An "Add..." button opens a category-grouped picker; "Refresh" clears the price cache and re-queries; each row has an inline X to remove it. The tab kicks off one throttled commodity query per configured item on show.
+13. **Run history** — the HUD captures every M+ run (mapID/level/affixes/timeLimit at start, completion status + onTime + upgradeLevels at end, plus the full per-combat list with forces killed and boss flags, plus the full per-death list with character names, classes, and elapsed times). The 20 most recent runs persist in `SeanKeysDB.runHistory`. A "History" button on the bottom-left of the main `/sk` window opens a viewer with a runs list on the left (newest first, with dungeon icon, +level, status, duration, date) and a detail panel on the right showing the selected run's affixes, status/duration/death count, a combat-by-combat breakdown (each row showing forces, time, and a red-skull death cell when that combat had any), and a DEATHS subsection listing each death chronologically with the player's class-colored name + MM:SS.
+14. **Death tracking** — during an active key the HUD polls `UnitIsDeadOrGhost` for player + party1..4 on the existing 0.5s ticker and records edge transitions (alive → dead) with the current in-key elapsed time. `COMBAT_LOG_EVENT_UNFILTERED` is unavailable to addons in Midnight (12.0), so we can't use the usual UNIT_DIED subevent. The booleans/strings the poll reads (`UnitIsDeadOrGhost`, `UnitName`, `UnitClass`, `UnitGUID`) aren't Secret Values, so the path stays valid inside encounters. Worst-case detection lag is one ticker period (~0.5s), which is fine for elapsed-time attribution. Hover behavior: the HUD's deaths-section icon shows a GameTooltip aggregating each player who died and their count; each combat row's red-skull death icon (HUD expanded panel and history detail) shows the chronological per-combat death list with class-colored name + MM:SS.
 
 ## The "three protocols" problem
 
@@ -48,6 +131,8 @@ SeanKeys/
   Wishlist.lua                            -- per-character wishlist module
   LootWindow.lua                          -- left-click loot preview window
   KeysWindow.lua                          -- main aggregated keys window
+  MythicPlusHud.lua                       -- in-key HUD + combat tracker (captures runs)
+  RunHistory.lua                          -- persistent run-history store + viewer window
   ConsumableShopping.lua                  -- AH "Consumables" tab + inline picker
   SeanKeys.lua                            -- slim entry: events, slash, season data
   Libs/
@@ -57,7 +142,7 @@ SeanKeys/
     LibAHTab/LibAHTab.lua                 -- AH custom-tab helper (from Auctionator)
 ```
 
-Load order matches the toc: Libs → Core → Data → Wishlist → LootWindow → KeysWindow → SeanKeys. Cross-file communication goes through the addon namespace `ns` (the second return of `local ADDON_NAME, ns = ...`).
+Load order matches the toc: Libs → Core → Data → Wishlist → LootWindow → KeysWindow → MythicPlusHud → RunHistory → ConsumableShopping → SeanKeys. Cross-file communication goes through the addon namespace `ns` (the second return of `local ADDON_NAME, ns = ...`).
 
 LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpenRaid is intentionally NOT embedded (large, complex; we read it opportunistically when Details loads it).
 
@@ -67,7 +152,9 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - **`Data.lua`** — owns `keys`, `selfDungeonBest`, `guildMembers` (exposed on `ns` for cross-file reads). `UpsertKey`/`UpsertSpec` mutate the in-memory store *and* call `PersistEntry` which caches the entry into `ns.db.cache` when the player is in `ns.db.myCharacters` (cat = "self") or in `guildMembers` (cat = "guild"). Protocol subscriptions (LKS callback, LSP group + guild callbacks, LibOpenRaid lazy bind, AstralKeys SV scan) and `PullSelf` live here.
 - **`Wishlist.lua`** — backed by `SeanKeysCharDB.wishlist[itemID] = { challengeMapID, name }`. Maintains an O(1) `mapHasWishlist[mapID] = count` derived index, rebuilt on `Init` and on every `Toggle`. Public API: `ns.Wishlist.IsWishlisted`, `Toggle`, `HasItemForDungeon`, `Init`.
 - **`LootWindow.lua`** — `CHALLENGE_TO_INSTANCEMAP` season table, EJ resolver (`GetJournalInstance` with 3 fallback paths), `GatherLoot`, `IsGearItem`, `BuildLootFrame`, `ns.ShowLootFor`. Owns the loot frame, gear rows, "other" icon grid, the wishlist star UI, the class/spec selector dropdown, and the dungeon selector dropdown. Holds module-level `active{MapID,KeyLevel,JournalID,ClassID,SpecID}` state; `ShowLootFor` resets these to player defaults each call, `RenderLoot` re-fetches loot from the journal using the current state, `ShowSpecMenu` opens a `MenuUtil` context menu that mutates spec state and calls `RenderLoot` to refresh in place, and `ShowDungeonMenu` → `SwitchToDungeon` does the same for dungeon state (re-resolving `activeJournalID` and refreshing title/portrait, but preserving spec and key level). `UpdateSpecSelectorText` / `UpdateDungeonSelectorText` keep the two subtitles in sync with active state.
-- **`KeysWindow.lua`** — main aggregated window. Owns `mainFrame`, rows, separators, the dynamic section-based layout in `ns.Refresh`, `PopulateRow`, `Toggle`, and the MDT integration (`TryOpenMDT`, `MDT_DungeonIdxFor`, `NormalizeDungeonName`). Custom font `SeanKeysLevelFont` (Skurri 16pt THICKOUTLINE) is created here. Hosts the bottom-right button cluster `[Debug] [Refresh]`.
+- **`KeysWindow.lua`** — main aggregated window. Owns `mainFrame`, rows, separators, the dynamic section-based layout in `ns.Refresh`, `PopulateRow`, `Toggle`, and the MDT integration (`TryOpenMDT`, `MDT_DungeonIdxFor`, `NormalizeDungeonName`). Custom font `SeanKeysLevelFont` (Skurri 16pt THICKOUTLINE) is created here. Hosts the bottom-right button cluster `[Debug] [Refresh]` and the bottom-left `[History]` button that opens the run-history viewer.
+- **`MythicPlusHud.lua`** — the in-key HUD frame plus combat tracking, death tracking, and the run-lifecycle hooks that feed `ns.RunHistory.Append`. `EnsureCurrentRunMeta` builds the in-flight `currentRun` snapshot lazily (covers login/reload mid-key by back-calculating `startEpoch` from `GetElapsedSeconds`); `FinalizeCurrentRun(completed, completionInfo)` packages `currentRun` + the `combats` array + the `deaths` array + (when completed) `C_ChallengeMode.GetCompletionInfo`'s `onTime` / `keystoneUpgradeLevels` / authoritative `time`, then hands the snapshot to `RunHistory`. Finalize triggers: `CHALLENGE_MODE_COMPLETED` (completed=true), `CHALLENGE_MODE_RESET` (abandoned), and the ticker observing `GetActiveRun() == nil` while `currentRun` is set (zone-out fallback). Test mode (`/sk hudtest`) is excluded from persistence so toggling it doesn't pollute history. Death tracking: `ScanForDeaths` polls `UnitIsDeadOrGhost` for player + party1..4 on the 0.5s ticker, comparing each unit's GUID-keyed state in `lastDeadStateByGUID` to detect alive→dead edges; on a new death it pushes `{ name, class, elapsed }` into `deaths`. `DeathsInCombat(combat)` re-derives per-combat counts from the elapsed-time window so the live panel cell and the saved-history cell use identical math.
+- **`RunHistory.lua`** — owns `ns.db.runHistory` (account-wide; capped at `MAX_RUNS = 20`, FIFO trim) and the viewer window. Public API: `ns.RunHistory.Init`, `ns.RunHistory.Append`, `ns.ShowRunHistory`. Window is a two-pane `PortraitFrameTemplate` at frame level 2300 (above keys/loot/debug). Left pane: 20 pre-built clickable run rows rendered newest-first with the dungeon portrait icon, `<name> +<lvl>`, status (timed +N / over time / abandoned, color-coded), end-time, and a stripe alpha that flips to a blue tint when selected. Right pane: detail view with title, affixes (recomputed from raw affixIDs via an inlined `ShortAffix` mirror of the HUD's), date+owner line, status+duration+death-count, a combat list (capped at `MAX_COMBAT_ROWS = 20`) that reuses the HUD expanded-panel column geometry verbatim (including the red-skull deaths cell), and a DEATHS subsection (capped at `MAX_DEATH_ROWS = 14`) listing each death chronologically with the player's class-colored name + MM:SS. Both lists truncate with a `(+N more)` footer. `DeathsInCombat(entry, c)` is the local equivalent of MythicPlusHud's same-named helper. Lazy `BuildHistoryFrame` is wrapped in `securecallfunction` on first `Show` for the same chrome-taint-isolation reason as the other windows.
 - **`ConsumableShopping.lua`** — the AH "Consumables" tab + inline picker + profile manager. Owns `ns.CURRENT_SEASON_CONSUMABLES` (the per-category item catalog — update each season), `ns.CONSUMABLE_CATEGORIES` (display order), the search queue, the price cache, and the buy flow. Per-row controls (quality dropdown between icon and name, target editbox, X remove) mutate `SeanKeysCharDB.consumableProfiles[active].lists[category]` directly. Top bar: profile dropdown (`ShowProfileMenu`), `+` (`AddProfile`), pencil to rename (StaticPopup `SEANKEYS_CONSUMABLE_RENAME_PROFILE`). `MigrateSpecToProfiles` runs on first access, rolling each non-empty spec-keyed list into its own named profile. `Add...` opens a category-grouped picker; `Refresh` clears the price cache and re-queries. Registers the tab via `LibAHTab-1-0` on `AUCTION_HOUSE_SHOW`. Drains one `C_AuctionHouse.SendSearchQuery` at a time, advancing on `COMMODITY_SEARCH_RESULTS_UPDATED` / `ITEM_SEARCH_RESULTS_UPDATED` and re-trying on `AUCTION_HOUSE_THROTTLED_SYSTEM_READY`. Buy flow: `StartCommoditiesPurchase` → wait for `COMMODITY_PRICE_UPDATED` → `ConfirmCommoditiesPurchase`, all wrapped in `securecallfunction`.
 - **`SeanKeys.lua`** — entry point. Holds `TELEPORT_SPELL_BY_CHALLENGEMAP` (season-specific), slash commands, `UpdateDebugButtonVisibility`, and the boot frame with all event registrations.
 
@@ -88,6 +175,7 @@ LibStub and LibKeystone are embedded so SeanKeys works even without DBM. LibOpen
 - `options.listenForEsc` — `boolean`, defaults `true`. Whether to register our container in `UISpecialFrames` (the ESC-routing global). Set false to opt out of ESC-closes-windows behavior if it causes taint problems. `/reload` required.
 - `myCharacters[fullName] = { class, lastSeen }` — every character on this account that's logged in; used to identify the "alts" section and to flag self for caching
 - `cache[fullName] = { level, mapID, rating, class, specID, role, source, lastSeen, category }` — persistent keystone cache for self + guildies
+- `runHistory = { { startEpoch, endEpoch, duration, mapID, name, level, affixes={id,...}, timeLimit, forcesTotal, completed, onTime, upgradeLevels, player, combats={ { startElapsed, duration, forcesKilled, forcesTotal, boss }, ... }, deaths={ { name, class, elapsed }, ... } }, ... }` — last 20 M+ runs (account-wide), populated by `MythicPlusHud` and rendered by `RunHistory`. Newest entry is at the array tail; oldest gets trimmed on append once `#runHistory > 20`. `deaths` is in chronological order (oldest first). Per-combat death counts are derived (not stored) — the renderer matches each death's `elapsed` against each combat's `[startElapsed, startElapsed+duration]` window. `forcesKilled` is a real mob-count delta and `forcesTotal` is the dungeon's denominator snapshotted at end-of-combat — both stored per-combat because Blizzard's `forcesQuantity` criterion is a 0..100 percentage (not a count) and `forcesTotal` zeroes out the instant the run completes. The run-level `forcesTotal` is the max across combats. `onTime` and `upgradeLevels` use `C_ChallengeMode.GetCompletionInfo` when its values populate; if the API returns partial data at the event edge, we fall back to deriving from `duration <= timeLimit` and the 60% / 80% / on-par tier breakpoints. `duration` prefers the API's ms value, then live elapsed, then wall-clock `endEpoch - startEpoch` — the last fallback covers the case where `WORLD_STATE_TIMER_STOP` zeroed our cached timer before we finalized. The mpHudPos location (saved drag position of the HUD) also lives here as `mpHudPos = { point, relPoint, x, y }`.
 
 `SeanKeysCharDB` (per-character):
 - `wishlist[itemID] = { challengeMapID, name, addedAt }` — wishlisted gear; only keyed by itemID (we don't track ilvl/specifics)
